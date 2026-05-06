@@ -25,6 +25,7 @@ Put the Oxford Arabic dictionary higher in the list if you want it to be preferr
 
 from __future__ import annotations
 
+import html
 import os
 import re
 import sys
@@ -55,7 +56,7 @@ except Exception:  # macOS/PyObjC only
 
 try:
     from PyQt6.QtCore import Qt, QUrl, QSettings, QTimer, pyqtSignal
-    from PyQt6.QtGui import QAction, QCursor, QKeySequence
+    from PyQt6.QtGui import QAction, QCursor, QGuiApplication, QKeySequence
     from PyQt6.QtWidgets import (
         QApplication,
         QFileDialog,
@@ -356,6 +357,100 @@ def dictionary_lookup(word: str) -> tuple[str, str]:
     return word, "No definition found in the active macOS dictionaries."
 
 
+def format_dictionary_definition_html(term: str, definition: str) -> str:
+    """
+    Apple Dictionary Services returns plain text, not the rich layout used by Dictionary.app.
+    This adds readable line breaks and simple HTML formatting.
+    """
+    raw = (definition or "").strip()
+    if not raw:
+        raw = "No definition found in the active macOS dictionaries."
+
+    nl = chr(10)
+    text = " ".join(raw.split())
+
+    # Dictionary.app entries often contain triangle bullets for subentries/examples.
+    text = text.replace("▸", nl + "    ▸ ")
+
+    # Put numbered senses on separate lines.
+    for number in range(1, 30):
+        text = text.replace(" " + str(number) + " ", nl + str(number) + " ")
+
+    # Put common parts of speech on separate lines.
+    for pos in ["noun", "verb", "adjective", "adverb", "plural", "preposition", "conjunction", "interjection"]:
+        text = text.replace(" " + pos + " ", nl + pos + " ")
+
+    parts = [line.rstrip() for line in text.split(nl) if line.strip()]
+    if not parts:
+        parts = [text]
+
+    html_lines: list[str] = []
+    for i, line in enumerate(parts):
+        escaped = html.escape(line)
+        if i == 0:
+            escaped = escaped.replace(" | ", " <span style='color:#777'>|</span> ")
+            html_lines.append("<div class='entry-head'>" + escaped + "</div>")
+        elif line.lstrip().startswith("▸"):
+            html_lines.append("<div class='subentry'>" + escaped + "</div>")
+        elif line.strip() and line.strip()[0].isdigit():
+            html_lines.append("<div class='sense'>" + escaped + "</div>")
+        elif line.lower().split(" ", 1)[0] in ["noun", "verb", "adjective", "adverb", "plural", "preposition", "conjunction", "interjection"]:
+            html_lines.append("<div class='pos'>" + escaped + "</div>")
+        else:
+            html_lines.append("<div>" + escaped + "</div>")
+
+    return """
+    <html>
+    <head>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Geeza Pro', 'Arial', sans-serif;
+            font-size: 18px;
+            line-height: 1.45;
+            margin: 0;
+            padding: 4px;
+            color: #111;
+            background: #fff;
+        }
+        .entry-head {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            direction: rtl;
+            unicode-bidi: plaintext;
+        }
+        .pos {
+            font-weight: 700;
+            color: #444;
+            margin-top: 8px;
+            margin-bottom: 4px;
+            direction: ltr;
+            unicode-bidi: plaintext;
+        }
+        .sense {
+            margin-top: 8px;
+            margin-bottom: 4px;
+            font-weight: 600;
+            direction: rtl;
+            unicode-bidi: plaintext;
+        }
+        .subentry {
+            margin-right: 22px;
+            margin-top: 4px;
+            direction: rtl;
+            unicode-bidi: plaintext;
+        }
+        div {
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+    </style>
+    </head>
+    <body>""" + "".join(html_lines) + """</body>
+    </html>
+    """
+
+
 class EpubBook:
     def __init__(self) -> None:
         self.path: Optional[Path] = None
@@ -536,10 +631,10 @@ class LookupPopup(QFrame):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, Qt.WindowType.Popup)
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setMinimumWidth(420)
-        self.setMaximumWidth(620)
-        self.setMinimumHeight(220)
-        self.setMaximumHeight(460)
+        self.setMinimumWidth(460)
+        self.setMaximumWidth(760)
+        self.setMinimumHeight(240)
+        self.setMaximumHeight(540)
 
         self.title = QLabel()
         self.title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -548,7 +643,8 @@ class LookupPopup(QFrame):
         self.definition = QTextEdit()
         self.definition.setReadOnly(True)
         self.definition.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        self.definition.setStyleSheet("font-size: 15px; line-height: 1.5;")
+        self.definition.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.definition.setStyleSheet("font-size: 16px; line-height: 1.5;")
 
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
@@ -574,11 +670,24 @@ class LookupPopup(QFrame):
             self.title.setText(f"{clicked_word}  →  {term_used}")
         else:
             self.title.setText(clicked_word)
-        self.definition.setPlainText(definition)
+        self.definition.setHtml(format_dictionary_definition_html(term_used or clicked_word, definition))
+        self.resize(620, 420)
         self.adjustSize()
 
         cursor_pos = QCursor.pos()
-        self.move(cursor_pos.x() + 14, cursor_pos.y() + 14)
+        desired_x = cursor_pos.x() + 14
+        desired_y = cursor_pos.y() + 14
+
+        screen = QGuiApplication.screenAt(cursor_pos) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            bounds = screen.availableGeometry()
+            width = min(max(self.width(), self.minimumWidth()), self.maximumWidth())
+            height = min(max(self.height(), self.minimumHeight()), self.maximumHeight())
+            desired_x = max(bounds.left() + 8, min(desired_x, bounds.right() - width - 8))
+            desired_y = max(bounds.top() + 8, min(desired_y, bounds.bottom() - height - 8))
+            self.resize(width, height)
+
+        self.move(desired_x, desired_y)
         self.show()
         self.raise_()
         self.activateWindow()
