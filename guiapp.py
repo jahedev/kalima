@@ -600,6 +600,7 @@ class MainWindow(QMainWindow):
         self.book = EpubBook()
         self.current_chapter_index = -1
         self.zoom_factor = float(self.settings.value("zoom_factor", 1.0))
+        self.lookup_mode = str(self.settings.value("lookup_mode", "popup"))  # popup | dictionary_app
 
         self.chapter_list = QListWidget()
         self.chapter_list.setMaximumWidth(320)
@@ -694,6 +695,16 @@ class MainWindow(QMainWindow):
         find_next_action.triggered.connect(self.find_next)
         toolbar.addAction(find_next_action)
 
+        toolbar.addSeparator()
+        self.lookup_mode_action = QAction(self._lookup_mode_label(), self)
+        self.lookup_mode_action.setToolTip(
+            "Toggle lookup behavior: in-app popup or macOS Dictionary.app. "
+            "True macOS Force Click popover is not reliably exposed through PyQt WebEngine, "
+            "so Dictionary.app mode uses dict://word."
+        )
+        self.lookup_mode_action.triggered.connect(self.toggle_lookup_mode)
+        toolbar.addAction(self.lookup_mode_action)
+
     def choose_epub(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -779,13 +790,40 @@ class MainWindow(QMainWindow):
         if text:
             self.reader_view.findText(text)
 
+    def _lookup_mode_label(self) -> str:
+        if getattr(self, "lookup_mode", "popup") == "dictionary_app":
+            return "Lookup: Dictionary.app"
+        return "Lookup: Popup"
+
+    def toggle_lookup_mode(self) -> None:
+        self.lookup_mode = "dictionary_app" if self.lookup_mode == "popup" else "popup"
+        self.settings.setValue("lookup_mode", self.lookup_mode)
+        self.lookup_mode_action.setText(self._lookup_mode_label())
+        if self.lookup_mode == "dictionary_app":
+            self.statusBar().showMessage("Lookup mode: opens macOS Dictionary.app with dict://word")
+        else:
+            self.statusBar().showMessage("Lookup mode: in-app popup")
+
+    def open_word_in_dictionary_app(self, word: str) -> None:
+        word = clean_lookup_word(word)
+        if not word:
+            return
+        # macOS Dictionary.app supports dict:// URLs. This is more reliable from PyQt
+        # than trying to invoke the native Force Click lookup popover inside QWebEngine.
+        os.system(f"open 'dict://{word}' >/dev/null 2>&1 &")
+
     def lookup_word(self, clicked_word: str) -> None:
         clicked_word = clean_lookup_word(clicked_word)
         if not clicked_word:
             return
+
+        if self.lookup_mode == "dictionary_app":
+            self.open_word_in_dictionary_app(clicked_word)
+            return
+
         term_used, definition = dictionary_lookup(clicked_word)
         self.lookup_popup.show_lookup(clicked_word, term_used, definition)
- 
+
     def _sync_chapter_from_path(self, local_path: str) -> None:
         path = Path(local_path)
         for idx, chapter in enumerate(self.book.chapters):
