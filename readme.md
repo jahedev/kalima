@@ -5,24 +5,15 @@ A macOS Arabic EPUB reader with clickable word lookup using Apple Dictionary.app
 ## Features
 
 * Open and read Arabic EPUB files
-* Right-to-left Arabic reading layout
-* Chapter/sidebar navigation
-* Font zoom controls
 * Search inside the current chapter
 * Click any word to show a dictionary popup
 * Optional lookup mode that opens macOS Dictionary.app
 * Save vocabulary to a local SQLite database
 * Edit the definition before saving
 * Add optional notes to saved words
-* Delete saved vocabulary entries
 * Saved words are highlighted blue in the EPUB
 * Reopening the same EPUB restores saved-word highlights
-* Toggle between showing:
-
-  * live Dictionary.app definition
-  * your saved definition
 * Export vocabulary to CSV
-* Export Anki-ready HTML import file
 
 ## macOS Dictionary Setup
 
@@ -108,8 +99,6 @@ Each saved entry stores:
 * chapter index
 * saved/updated timestamps
 
-EPUBs are remembered using a SHA-256 hash of the file, so reopening the same EPUB restores saved highlights.
-
 ## Export Vocabulary CSV
 
 Click **Export vocab CSV** to export saved vocabulary to:
@@ -120,37 +109,9 @@ Click **Export vocab CSV** to export saved vocabulary to:
 
 ## Export to Anki
 
-Click **Export Anki HTML** to create:
-
-```bash
-~/Documents/arabic_epub_anki_import.txt
-```
-
-The Anki export uses:
-
-```text
-#separator:Tab
-#html:true
-#columns:Front	Back
-```
-
-Card format:
-
-* **Front:** Arabic word only
-* **Back:** saved definition as HTML
-
-In Anki:
-
-1. Go to **File > Import**
-2. Choose `arabic_epub_anki_import.txt`
-3. Use a Basic note type
-4. Map `Front` to Front and `Back` to Back
-5. Keep HTML enabled if prompted
+Anki Support (in the future)
 
 ## Notes
 
 Apple’s Dictionary Services API returns plain-text dictionary output, not the full rich Dictionary.app layout. The app reformats the result for readability, but it may not exactly match Dictionary.app.
 
-## License
-
-Personal project. Add your preferred license before publishing publicly.
