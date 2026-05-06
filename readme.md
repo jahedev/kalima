@@ -44,13 +44,10 @@ pip install PyQt6 PyQt6-WebEngine ebooklib beautifulsoup4 lxml pyobjc-framework-
 ## Running
 
 ```bash
-python arabic_epub_dictionary_reader.py
-```
-
-Or, if your file is named differently:
-
-```bash
 python guiapp.py
+
+# command-line lookup
+python lookup.py شرح
 ```
 
 ## Usage
