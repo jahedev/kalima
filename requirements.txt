@@ -1,0 +1,6 @@
+PyQt6
+PyQt6-WebEngine
+ebooklib
+beautifulsoup4
+lxml
+pyobjc-framework-DictionaryServices; sys_platform == "darwin"
