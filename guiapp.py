@@ -450,9 +450,21 @@ def definition_text_to_readable_html(definition: str) -> str:
     return "".join(html_lines)
 
 
+def looks_like_html(text: str) -> bool:
+    sample = (text or "").strip().lower()
+    return sample.startswith("<html") or sample.startswith("<!doctype") or "<body" in sample or "<div" in sample or "<p" in sample
+
+
 def plain_text_to_user_html(text: str) -> str:
     lines = (text or "").splitlines() or [text or ""]
     return "".join("<div>" + html.escape(line) + "</div>" for line in lines)
+
+
+def saved_definition_to_html(text: str) -> str:
+    """Saved definitions may be rich HTML from QTextEdit or older plain-text entries."""
+    if looks_like_html(text):
+        return text
+    return plain_text_to_user_html(text)
 
 
 def format_lookup_html(record: LookupRecord) -> str:
@@ -466,7 +478,7 @@ def format_lookup_html(record: LookupRecord) -> str:
     saved_status_class = "saved" if record.saved else "unsaved"
 
     if record.displayed_source == "Saved definition":
-        definition_body = plain_text_to_user_html(record.displayed_definition)
+        definition_body = saved_definition_to_html(record.displayed_definition)
     else:
         definition_body = definition_text_to_readable_html(record.displayed_definition)
 
@@ -571,7 +583,6 @@ def format_lookup_html(record: LookupRecord) -> str:
             {definition_body}
         </div>
         {note_block}
-        <!--
         <div class="section">
             <div class="label">Word</div>
             <div class="word">{word}</div>
@@ -580,7 +591,6 @@ def format_lookup_html(record: LookupRecord) -> str:
             <div class="meta">Book: {book_title}</div>
             <div class="meta">Chapter: {chapter}</div>
         </div>
-        -->
     </body>
     </html>
     """
@@ -984,11 +994,16 @@ class SaveVocabDialog(QDialog):
         meta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         self.definition_edit = QTextEdit()
+        self.definition_edit.setAcceptRichText(True)
         self.definition_edit.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.definition_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.definition_edit.setPlaceholderText("Edit the definition before saving…")
+        self.definition_edit.setStyleSheet("font-size: 17px; line-height: 1.35;")
         initial_definition = record.saved.saved_definition if record.saved else record.dictionary_definition
-        self.definition_edit.setPlainText(initial_definition or "")
+        if record.saved:
+            self.definition_edit.setHtml(saved_definition_to_html(initial_definition or ""))
+        else:
+            self.definition_edit.setHtml(definition_text_to_readable_html(initial_definition or ""))
 
         self.note_edit = QTextEdit()
         self.note_edit.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
@@ -1016,13 +1031,17 @@ class SaveVocabDialog(QDialog):
         layout.addWidget(QLabel("Word"))
         layout.addWidget(word_label)
         layout.addWidget(meta)
-        layout.addWidget(QLabel("Saved definition — edit, delete, or add anything before saving"))
+        layout.addWidget(QLabel("Saved definition — edit, delete, or add anything before saving. Formatting is kept."))
         layout.addWidget(self.definition_edit)
         layout.addWidget(QLabel("Optional note"))
         layout.addWidget(self.note_edit)
         layout.addLayout(button_row)
 
     def saved_definition(self) -> str:
+        # Store rich HTML so line breaks and bold styling survive after saving.
+        return self.definition_edit.toHtml().strip()
+
+    def saved_definition_plain_text(self) -> str:
         return self.definition_edit.toPlainText().strip()
 
     def note(self) -> str:
@@ -1462,7 +1481,7 @@ class MainWindow(QMainWindow):
         dialog.deletedRequested.connect(self.delete_vocabulary_record)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             saved_definition = dialog.saved_definition()
-            if not saved_definition:
+            if not dialog.saved_definition_plain_text():
                 QMessageBox.warning(self, "Definition required", "Please enter a definition before saving.")
                 return
             self.vocab_store.save_word(record, saved_definition=saved_definition, note=dialog.note())
