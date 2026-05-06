@@ -410,10 +410,10 @@ def dictionary_lookup(word: str) -> tuple[str, str]:
     return word, "No definition found in the active macOS dictionaries."
 
 
-def definition_text_to_readable_html(definition: str) -> str:
+def dictionary_definition_parts(definition: str) -> list[str]:
     """
-    Apple Dictionary Services returns plain text, not the rich layout used by Dictionary.app.
-    This adds readable line breaks and simple HTML formatting.
+    Apple Dictionary Services returns one plain-text string. Split it into readable
+    lines that work both in the popup and in the editable save dialog.
     """
     raw = (definition or "").strip()
     if not raw:
@@ -421,7 +421,7 @@ def definition_text_to_readable_html(definition: str) -> str:
 
     nl = chr(10)
     text = " ".join(raw.split())
-    text = text.replace("▸", nl + "    ▸ ")
+    text = text.replace("▸", nl + "▸ ")
 
     for number in range(1, 30):
         text = text.replace(" " + str(number) + " ", nl + str(number) + " ")
@@ -429,9 +429,19 @@ def definition_text_to_readable_html(definition: str) -> str:
     for pos in ["noun", "verb", "adjective", "adverb", "plural", "preposition", "conjunction", "interjection"]:
         text = text.replace(" " + pos + " ", nl + pos + " ")
 
-    parts = [line.rstrip() for line in text.split(nl) if line.strip()]
-    if not parts:
-        parts = [text]
+    parts = [line.strip() for line in text.split(nl) if line.strip()]
+    return parts or [text]
+
+
+def definition_text_to_editable_text(definition: str) -> str:
+    return "\n".join(dictionary_definition_parts(definition))
+
+
+def definition_text_to_readable_html(definition: str) -> str:
+    """
+    Format a Dictionary Services result for the read-only popup.
+    """
+    parts = dictionary_definition_parts(definition)
 
     html_lines: list[str] = []
     for i, line in enumerate(parts):
@@ -460,11 +470,21 @@ def plain_text_to_user_html(text: str) -> str:
     return "".join("<div>" + html.escape(line) + "</div>" for line in lines)
 
 
-def saved_definition_to_html(text: str) -> str:
-    """Saved definitions may be rich HTML from QTextEdit or older plain-text entries."""
+def saved_definition_to_plain_text(text: str) -> str:
+    """Handle newer plain-text entries and older rich-HTML entries cleanly."""
+    text = text or ""
     if looks_like_html(text):
-        return text
-    return plain_text_to_user_html(text)
+        soup = BeautifulSoup(text, "html.parser")
+        text = soup.get_text("\n")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return "\n".join(lines)
+    if "\n" not in text and "▸" in text:
+        return definition_text_to_editable_text(text)
+    return text.strip()
+
+
+def saved_definition_to_html(text: str) -> str:
+    return plain_text_to_user_html(saved_definition_to_plain_text(text))
 
 
 def format_lookup_html(record: LookupRecord) -> str:
@@ -994,16 +1014,16 @@ class SaveVocabDialog(QDialog):
         meta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         self.definition_edit = QTextEdit()
-        self.definition_edit.setAcceptRichText(True)
+        self.definition_edit.setAcceptRichText(False)
         self.definition_edit.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.definition_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.definition_edit.setPlaceholderText("Edit the definition before saving…")
         self.definition_edit.setStyleSheet("font-size: 17px; line-height: 1.35;")
         initial_definition = record.saved.saved_definition if record.saved else record.dictionary_definition
         if record.saved:
-            self.definition_edit.setHtml(saved_definition_to_html(initial_definition or ""))
+            self.definition_edit.setPlainText(saved_definition_to_plain_text(initial_definition or ""))
         else:
-            self.definition_edit.setHtml(definition_text_to_readable_html(initial_definition or ""))
+            self.definition_edit.setPlainText(definition_text_to_editable_text(initial_definition or ""))
 
         self.note_edit = QTextEdit()
         self.note_edit.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
@@ -1031,15 +1051,15 @@ class SaveVocabDialog(QDialog):
         layout.addWidget(QLabel("Word"))
         layout.addWidget(word_label)
         layout.addWidget(meta)
-        layout.addWidget(QLabel("Saved definition — edit, delete, or add anything before saving. Formatting is kept."))
+        layout.addWidget(QLabel("Saved definition — edit, delete, or add anything before saving. Line breaks are kept."))
         layout.addWidget(self.definition_edit)
         layout.addWidget(QLabel("Optional note"))
         layout.addWidget(self.note_edit)
         layout.addLayout(button_row)
 
     def saved_definition(self) -> str:
-        # Store rich HTML so line breaks and bold styling survive after saving.
-        return self.definition_edit.toHtml().strip()
+        # Store clean editable text. The popup converts line breaks back into readable HTML.
+        return self.definition_edit.toPlainText().strip()
 
     def saved_definition_plain_text(self) -> str:
         return self.definition_edit.toPlainText().strip()
