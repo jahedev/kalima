@@ -9,9 +9,6 @@ Features
 - Font zoom controls
 - Find-in-chapter search
 - Click any word to show the macOS Dictionary Services result
-- Shows surrounding sentence for the clicked word
-- Shows a lightweight Arabic stem/root helper
-- Save vocabulary to CSV for review or Anki import
 - Uses Apple Dictionary.app dictionaries, including Oxford Arabic if enabled in Dictionary.app
 
 macOS setup
@@ -28,8 +25,6 @@ Put the Oxford Arabic dictionary higher in the list if you want it to be preferr
 
 from __future__ import annotations
 
-import csv
-import datetime as dt
 import html
 import os
 import re
@@ -38,7 +33,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import unquote, urlparse, parse_qs
 
 try:
     import ebooklib
@@ -100,8 +95,6 @@ ARABIC_DIACRITICS_RE = re.compile(
 TRIM_CHARS = """\ufeff\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069
 \t\r\n .,;:!?()[]{}<>\"'“”‘’،؛؟«»…ـ"""
 
-VOCAB_CSV_PATH = Path.home() / "Documents" / "arabic_epub_vocab.csv"
-
 READER_CSS = """
 html, body {
     direction: rtl;
@@ -154,35 +147,66 @@ WORD_AT_POINT_JS = r"""
             .trim();
     }
 
-    function sentenceAroundNode(node) {
-        let container = node;
-        while (container && container !== document.body) {
-            const name = container.nodeName;
-            if (["P", "DIV", "LI", "BLOCKQUOTE", "SECTION", "ARTICLE", "TD"].includes(name)) break;
-            container = container.parentNode;
-        }
-        const text = clean((container || document.body).innerText || "");
-        if (!text) return "";
-        const sentences = text.split(/(?<=[\.\!\?؟؛،])\s+|\n+/).map(clean).filter(Boolean);
-        if (!sentences.length) return text.slice(0, 450);
-        const chosen = sentences.find(s => s.includes(clean(node.textContent || ""))) || sentences[0];
-        return chosen.slice(0, 650);
-    }
-
     const selection = window.getSelection ? window.getSelection().toString().trim() : "";
     if (selection && selection.length <= 80) {
-        return {word: clean(selection.split(/\s+/)[0]), sentence: ""};
+        return clean(selection.split(/\s+/)[0]);
     }
 
     const el = document.elementFromPoint(x, y);
     if (el && el.closest) {
         const span = el.closest(".lookup-word");
         if (span && span.dataset && span.dataset.word) {
-            return {word: clean(span.dataset.word), sentence: sentenceAroundNode(span)};
+            return clean(span.dataset.word);
         }
     }
 
-    return {word: "", sentence: ""};
+    let range = null;
+    if (document.caretRangeFromPoint) {
+        range = document.caretRangeFromPoint(x, y);
+    } else if (document.caretPositionFromPoint) {
+        const pos = document.caretPositionFromPoint(x, y);
+        if (pos) {
+            range = document.createRange();
+            range.setStart(pos.offsetNode, pos.offset);
+            range.collapse(true);
+        }
+    }
+
+    if (!range || !range.startContainer) return "";
+
+    let node = range.startContainer;
+    let offset = range.startOffset;
+
+    function firstTextNode(n) {
+        if (!n) return null;
+        if (n.nodeType === Node.TEXT_NODE) return n;
+        for (const child of n.childNodes || []) {
+            const found = firstTextNode(child);
+            if (found) return found;
+        }
+        return null;
+    }
+
+    if (node.nodeType !== Node.TEXT_NODE) {
+        node = firstTextNode(node.childNodes ? node.childNodes[offset] : node) || firstTextNode(node);
+        offset = 0;
+    }
+
+    if (!node || node.nodeType !== Node.TEXT_NODE) return "";
+
+    const text = node.textContent || "";
+    const wordRe = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFFA-Za-zÀ-ÖØ-öø-ÿ0-9’'\-]+/g;
+
+    let match;
+    while ((match = wordRe.exec(text)) !== null) {
+        const start = match.index;
+        const end = start + match[0].length;
+        if (offset >= start && offset <= end) {
+            return clean(match[0]);
+        }
+    }
+
+    return "";
 })();
 """
 
@@ -200,45 +224,7 @@ INSTALL_WORD_LOOKUP_JS = r"""
             .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
             .replace(/^[\s.,;:!?()\[\]{}<>"'“”‘’،؛؟«»…ـ]+/g, "")
             .replace(/[\s.,;:!?()\[\]{}<>"'“”‘’،؛؟«»…ـ]+$/g, "")
-            .replace(/\s+/g, " ")
             .trim();
-    }
-
-    function sentenceAroundElement(el) {
-        let container = el;
-        while (container && container !== document.body) {
-            const name = container.nodeName;
-            if (["P", "DIV", "LI", "BLOCKQUOTE", "SECTION", "ARTICLE", "TD"].includes(name)) break;
-            container = container.parentNode;
-        }
-        const blockText = clean((container || document.body).innerText || "");
-        const word = clean(el.dataset.word || el.textContent || "");
-        if (!blockText) return "";
-
-        const sentences = blockText
-            .split(/(?<=[\.\!\?؟؛])\s+|\n+/)
-            .map(clean)
-            .filter(Boolean);
-
-        let chosen = "";
-        for (const sentence of sentences) {
-            if (sentence.includes(word)) {
-                chosen = sentence;
-                break;
-            }
-        }
-
-        if (!chosen) {
-            const idx = blockText.indexOf(word);
-            if (idx >= 0) {
-                const start = Math.max(0, idx - 220);
-                const end = Math.min(blockText.length, idx + word.length + 220);
-                chosen = blockText.slice(start, end);
-            } else {
-                chosen = blockText.slice(0, 450);
-            }
-        }
-        return chosen.slice(0, 700);
     }
 
     function shouldSkip(node) {
@@ -287,7 +273,6 @@ INSTALL_WORD_LOOKUP_JS = r"""
         if (!el) return;
         const word = clean(el.dataset.word || el.textContent || "");
         if (!word) return;
-        const sentence = sentenceAroundElement(el);
 
         document.querySelectorAll(".lookup-word-active").forEach(function(x) {
             x.classList.remove("lookup-word-active");
@@ -296,7 +281,7 @@ INSTALL_WORD_LOOKUP_JS = r"""
 
         e.preventDefault();
         e.stopPropagation();
-        window.location.href = "lookup://word?value=" + encodeURIComponent(word) + "&sentence=" + encodeURIComponent(sentence);
+        window.location.href = "lookup://word?value=" + encodeURIComponent(word);
     }, true);
 
     return "installed";
@@ -310,26 +295,6 @@ class Chapter:
     title: str
     item_name: str
     file_path: Path
-
-
-@dataclass
-class ArabicAnalysis:
-    normalized: str
-    stem: str
-    likely_root: str
-    pattern: str
-    notes: str
-
-
-@dataclass
-class LookupRecord:
-    clicked_word: str = ""
-    term_used: str = ""
-    definition: str = ""
-    sentence: str = ""
-    analysis: Optional[ArabicAnalysis] = None
-    book: str = ""
-    chapter: str = ""
 
 
 def safe_output_path(base_dir: Path, item_name: str) -> Path:
@@ -348,15 +313,6 @@ def clean_lookup_word(word: str) -> str:
     word = word.replace("\u0640", "")  # tatweel
     word = re.sub(r"\s+", " ", word)
     return word.strip(TRIM_CHARS)
-
-
-def normalize_arabic(word: str) -> str:
-    word = clean_lookup_word(word)
-    word = ARABIC_DIACRITICS_RE.sub("", word)
-    word = word.replace("ـ", "")
-    word = word.replace("ٱ", "ا").replace("آ", "ا").replace("أ", "ا").replace("إ", "ا")
-    word = word.replace("ى", "ي")
-    return word
 
 
 def lookup_variants(word: str) -> list[str]:
@@ -399,87 +355,6 @@ def dictionary_lookup(word: str) -> tuple[str, str]:
             return term, str(result)
 
     return word, "No definition found in the active macOS dictionaries."
-
-
-def likely_arabic_analysis(word: str) -> ArabicAnalysis:
-    """
-    Lightweight Arabic helper, not a full morphological analyzer.
-    It gives a useful study hint: normalized form, rough stem, and possible root.
-    """
-    normalized = normalize_arabic(word)
-    stem = normalized
-    notes: list[str] = []
-    pattern = "heuristic"
-
-    # Remove common clitics/prefixes conservatively.
-    prefixes = [
-        "وال", "فال", "بال", "كال", "لل", "ال",
-        "و", "ف", "ب", "ك", "ل", "س",
-        "يت", "تت", "است", "مست", "نست",
-    ]
-    suffixes = [
-        "كما", "هما", "كن", "كم", "ها", "هم", "هن", "نا", "ني", "ي", "ه",
-        "تين", "تان", "ون", "ين", "ات", "ان", "ة", "ا",
-    ]
-
-    for prefix in sorted(prefixes, key=len, reverse=True):
-        if stem.startswith(prefix) and len(stem) - len(prefix) >= 3:
-            stem = stem[len(prefix):]
-            notes.append(f"removed prefix: {prefix}")
-            break
-
-    for suffix in sorted(suffixes, key=len, reverse=True):
-        if stem.endswith(suffix) and len(stem) - len(suffix) >= 3:
-            stem = stem[: -len(suffix)]
-            notes.append(f"removed suffix: {suffix}")
-            break
-
-    # Handle common derived forms/patterns.
-    root = ""
-    s = stem
-
-    if normalized.startswith("است") and len(normalized) >= 6:
-        core = normalized[3:]
-        if len(core) >= 3:
-            root = core[:3]
-            pattern = "استفعل / استفعال hint"
-            notes.append("recognized possible استفعل/استفعال pattern")
-    elif s.startswith("م") and len(s) >= 4:
-        core = s[1:]
-        if len(core) >= 3:
-            root = core[:3]
-            pattern = "مفعل / مفعول hint"
-            notes.append("initial م may be part of a derived noun/participle")
-    elif len(s) >= 5 and s[1] == "ا":
-        # فاعل / مفاعل style clue: keep first, third, fourth letters when possible.
-        root = s[0] + s[2] + s[3]
-        pattern = "فاعل / related hint"
-        notes.append("ا after first letter may indicate a derived pattern")
-    elif len(s) >= 5 and s.startswith("ت"):
-        root = s[1:4]
-        pattern = "تفعّل / تفاعل hint"
-        notes.append("initial ت may indicate a derived verb form")
-    elif len(s) >= 4 and s[1] in {"و", "ا", "ي"}:
-        root = s[0] + s[2] + s[3]
-        pattern = "hollow/derived hint"
-        notes.append("middle weak letter may not be part of the root")
-    else:
-        arabic_letters = [ch for ch in s if "\u0600" <= ch <= "\u06FF"]
-        root = "".join(arabic_letters[:3])
-        pattern = "first-three-letter hint"
-
-    likely_root = " ".join(root[:3]) if root else "—"
-    if not notes:
-        notes.append("rough estimate only")
-    notes.append("not a full Sarf analyzer; verify with dictionary/context")
-
-    return ArabicAnalysis(
-        normalized=normalized or word,
-        stem=stem or normalized or word,
-        likely_root=likely_root,
-        pattern=pattern,
-        notes="; ".join(notes),
-    )
 
 
 def format_dictionary_definition_html(term: str, definition: str) -> str:
@@ -572,137 +447,6 @@ def format_dictionary_definition_html(term: str, definition: str) -> str:
     </style>
     </head>
     <body>""" + "".join(html_lines) + """</body>
-    </html>
-    """
-
-
-def format_full_lookup_html(record: LookupRecord) -> str:
-    analysis = record.analysis or likely_arabic_analysis(record.clicked_word)
-    sentence = html.escape(record.sentence or "No sentence context captured.")
-    word = html.escape(record.clicked_word)
-    term = html.escape(record.term_used or record.clicked_word)
-    root = html.escape(analysis.likely_root)
-    normalized = html.escape(analysis.normalized)
-    stem = html.escape(analysis.stem)
-    pattern = html.escape(analysis.pattern)
-    notes = html.escape(analysis.notes)
-    definition_html = format_dictionary_definition_html(record.term_used, record.definition)
-
-    # Extract only the body from the definition HTML so it can be embedded.
-    match = re.search(r"<body>(.*)</body>", definition_html, flags=re.DOTALL)
-    definition_body = match.group(1) if match else html.escape(record.definition)
-
-    return f"""
-    <html>
-    <head>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Geeza Pro', 'Arial', sans-serif;
-            font-size: 16px;
-            line-height: 1.45;
-            margin: 0;
-            padding: 4px;
-            color: #111;
-            background: #fff;
-        }}
-        .section {{
-            border-bottom: 1px solid #ddd;
-            padding-bottom: 10px;
-            margin-bottom: 12px;
-        }}
-        .label {{
-            font-weight: 700;
-            color: #555;
-            margin-bottom: 4px;
-            direction: ltr;
-        }}
-        .word {{
-            font-size: 24px;
-            font-weight: 800;
-            direction: rtl;
-            unicode-bidi: plaintext;
-        }}
-        .sentence {{
-            direction: rtl;
-            unicode-bidi: plaintext;
-            background: #fff8dc;
-            border: 1px solid #ead99a;
-            border-radius: 8px;
-            padding: 8px;
-            font-size: 18px;
-        }}
-        .analysis-grid {{
-            display: grid;
-            grid-template-columns: 115px 1fr;
-            gap: 4px 10px;
-        }}
-        .analysis-key {{
-            color: #666;
-            font-weight: 700;
-        }}
-        .analysis-value {{
-            direction: rtl;
-            unicode-bidi: plaintext;
-        }}
-        .entry-head {{
-            font-size: 20px;
-            font-weight: 700;
-            margin-bottom: 10px;
-            direction: rtl;
-            unicode-bidi: plaintext;
-        }}
-        .pos {{
-            font-weight: 700;
-            color: #444;
-            margin-top: 8px;
-            margin-bottom: 4px;
-            direction: ltr;
-            unicode-bidi: plaintext;
-        }}
-        .sense {{
-            margin-top: 8px;
-            margin-bottom: 4px;
-            font-weight: 600;
-            direction: rtl;
-            unicode-bidi: plaintext;
-        }}
-        .subentry {{
-            margin-right: 22px;
-            margin-top: 4px;
-            direction: rtl;
-            unicode-bidi: plaintext;
-        }}
-        div {{
-            white-space: normal;
-            overflow-wrap: anywhere;
-        }}
-    </style>
-    </head>
-    <body>
-        <div class="section">
-            <div class="label">Word</div>
-            <div class="word">{word}</div>
-            <div style="color:#777; margin-top:4px;">Dictionary term: {term}</div>
-        </div>
-        <div class="section">
-            <div class="label">Sentence context</div>
-            <div class="sentence">{sentence}</div>
-        </div>
-        <div class="section">
-            <div class="label">Arabic root/stem helper</div>
-            <div class="analysis-grid">
-                <div class="analysis-key">Root hint</div><div class="analysis-value">{root}</div>
-                <div class="analysis-key">Stem hint</div><div class="analysis-value">{stem}</div>
-                <div class="analysis-key">Normalized</div><div class="analysis-value">{normalized}</div>
-                <div class="analysis-key">Pattern</div><div class="analysis-value">{pattern}</div>
-                <div class="analysis-key">Notes</div><div>{notes}</div>
-            </div>
-        </div>
-        <div class="section">
-            <div class="label">Dictionary</div>
-            {definition_body}
-        </div>
-    </body>
     </html>
     """
 
@@ -830,18 +574,15 @@ class EpubBook:
 
 class ReaderPage(QWebEnginePage):
     chapterNavigationRequested = pyqtSignal(str)
-    wordLookupRequested = pyqtSignal(str, str)
+    wordLookupRequested = pyqtSignal(str)
 
     def acceptNavigationRequest(self, url: QUrl, nav_type: QWebEnginePage.NavigationType, is_main_frame: bool) -> bool:
         if url.scheme() == "lookup":
             parsed = urlparse(url.toString())
-            qs = parse_qs(parsed.query)
-            query_value = qs.get("value", [""])[0]
-            query_sentence = qs.get("sentence", [""])[0]
+            query_value = parse_qs(parsed.query).get("value", [""])[0]
             word = clean_lookup_word(unquote(query_value))
-            sentence = clean_lookup_word(unquote(query_sentence))
             if word:
-                self.wordLookupRequested.emit(word, sentence)
+                self.wordLookupRequested.emit(word)
             return False
 
         if nav_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked and url.isLocalFile():
@@ -851,7 +592,7 @@ class ReaderPage(QWebEnginePage):
 
 
 class ReaderView(QWebEngineView):
-    wordClicked = pyqtSignal(str, str)
+    wordClicked = pyqtSignal(str)
 
     def mouseReleaseEvent(self, event):  # noqa: N802 - Qt method name
         super().mouseReleaseEvent(event)
@@ -872,34 +613,28 @@ class ReaderView(QWebEngineView):
     def _lookup_selected_text(self) -> None:
         selected = clean_lookup_word(self.page().selectedText())
         if selected:
-            self.wordClicked.emit(selected.split()[0], "")
+            self.wordClicked.emit(selected.split()[0])
 
     def _lookup_at_position(self, x: int, y: int) -> None:
         js = WORD_AT_POINT_JS.replace("__X__", str(x)).replace("__Y__", str(y))
         self.page().runJavaScript(js, self._emit_word_if_any)
 
-    def _emit_word_if_any(self, payload: object) -> None:
-        word = ""
-        sentence = ""
-        if isinstance(payload, dict):
-            word = clean_lookup_word(str(payload.get("word", "")))
-            sentence = clean_lookup_word(str(payload.get("sentence", "")))
-        elif isinstance(payload, str):
-            word = clean_lookup_word(payload)
+    def _emit_word_if_any(self, word: object) -> None:
+        if not isinstance(word, str):
+            return
+        word = clean_lookup_word(word)
         if word:
-            self.wordClicked.emit(word, sentence)
+            self.wordClicked.emit(word)
 
 
 class LookupPopup(QFrame):
-    saveRequested = pyqtSignal(object)
-
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, Qt.WindowType.Popup)
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setMinimumWidth(500)
-        self.setMaximumWidth(820)
-        self.setMinimumHeight(320)
-        self.setMaximumHeight(640)
+        self.setMinimumWidth(460)
+        self.setMaximumWidth(760)
+        self.setMinimumHeight(240)
+        self.setMaximumHeight(540)
 
         self.title = QLabel()
         self.title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -911,9 +646,6 @@ class LookupPopup(QFrame):
         self.definition.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.definition.setStyleSheet("font-size: 16px; line-height: 1.5;")
 
-        self.save_btn = QPushButton("Save word")
-        self.save_btn.clicked.connect(self._emit_save)
-
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
 
@@ -922,7 +654,6 @@ class LookupPopup(QFrame):
 
         button_row = QHBoxLayout()
         button_row.addWidget(open_dictionary_btn)
-        button_row.addWidget(self.save_btn)
         button_row.addStretch(1)
         button_row.addWidget(close_btn)
 
@@ -932,19 +663,15 @@ class LookupPopup(QFrame):
         layout.addLayout(button_row)
 
         self._current_word = ""
-        self._current_record: Optional[LookupRecord] = None
 
-    def show_lookup(self, record: LookupRecord) -> None:
-        self._current_record = record
-        clicked_word = record.clicked_word
-        term_used = record.term_used
+    def show_lookup(self, clicked_word: str, term_used: str, definition: str) -> None:
         self._current_word = term_used or clicked_word
         if term_used and term_used != clicked_word:
             self.title.setText(f"{clicked_word}  →  {term_used}")
         else:
             self.title.setText(clicked_word)
-        self.definition.setHtml(format_full_lookup_html(record))
-        self.resize(680, 520)
+        self.definition.setHtml(format_dictionary_definition_html(term_used or clicked_word, definition))
+        self.resize(620, 420)
         self.adjustSize()
 
         cursor_pos = QCursor.pos()
@@ -965,14 +692,11 @@ class LookupPopup(QFrame):
         self.raise_()
         self.activateWindow()
 
-    def _emit_save(self) -> None:
-        if self._current_record is not None:
-            self.saveRequested.emit(self._current_record)
-
     def open_in_dictionary_app(self) -> None:
         if not self._current_word:
             return
-        os.system(f"open 'dict://{quote(self._current_word)}' >/dev/null 2>&1 &")
+        # macOS supports dict:// URLs for Dictionary.app.
+        os.system(f"open 'dict://{self._current_word}' >/dev/null 2>&1 &")
 
 
 class MainWindow(QMainWindow):
@@ -1009,7 +733,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(splitter)
 
         self.lookup_popup = LookupPopup(self)
-        self.lookup_popup.saveRequested.connect(self.save_vocabulary_record)
         self.find_box = QLineEdit()
         self.find_box.setPlaceholderText("Find in chapter…")
         self.find_box.returnPressed.connect(self.find_next)
@@ -1090,11 +813,6 @@ class MainWindow(QMainWindow):
         )
         self.lookup_mode_action.triggered.connect(self.toggle_lookup_mode)
         toolbar.addAction(self.lookup_mode_action)
-
-        export_action = QAction("Open vocab CSV", self)
-        export_action.setToolTip(f"Vocabulary is saved to {VOCAB_CSV_PATH}")
-        export_action.triggered.connect(self.open_vocab_csv)
-        toolbar.addAction(export_action)
 
     def choose_epub(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1193,22 +911,18 @@ class MainWindow(QMainWindow):
         if self.lookup_mode == "dictionary_app":
             self.statusBar().showMessage("Lookup mode: opens macOS Dictionary.app with dict://word")
         else:
-            self.statusBar().showMessage("Lookup mode: in-app popup with sentence + root/stem helper")
+            self.statusBar().showMessage("Lookup mode: in-app popup")
 
     def open_word_in_dictionary_app(self, word: str) -> None:
         word = clean_lookup_word(word)
         if not word:
             return
-        os.system(f"open 'dict://{quote(word)}' >/dev/null 2>&1 &")
+        # macOS Dictionary.app supports dict:// URLs. This is more reliable from PyQt
+        # than trying to invoke the native Force Click lookup popover inside QWebEngine.
+        os.system(f"open 'dict://{word}' >/dev/null 2>&1 &")
 
-    def current_chapter_title(self) -> str:
-        if 0 <= self.current_chapter_index < len(self.book.chapters):
-            return self.book.chapters[self.current_chapter_index].title
-        return ""
-
-    def lookup_word(self, clicked_word: str, sentence: str = "") -> None:
+    def lookup_word(self, clicked_word: str) -> None:
         clicked_word = clean_lookup_word(clicked_word)
-        sentence = clean_lookup_word(sentence)
         if not clicked_word:
             return
 
@@ -1217,86 +931,7 @@ class MainWindow(QMainWindow):
             return
 
         term_used, definition = dictionary_lookup(clicked_word)
-        analysis = likely_arabic_analysis(clicked_word)
-        record = LookupRecord(
-            clicked_word=clicked_word,
-            term_used=term_used,
-            definition=definition,
-            sentence=sentence,
-            analysis=analysis,
-            book=self.book.path.name if self.book.path else "",
-            chapter=self.current_chapter_title(),
-        )
-        self.lookup_popup.show_lookup(record)
-
-    def save_vocabulary_record(self, record_obj: object) -> None:
-        if not isinstance(record_obj, LookupRecord):
-            return
-        record = record_obj
-        analysis = record.analysis or likely_arabic_analysis(record.clicked_word)
-        VOCAB_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-        file_exists = VOCAB_CSV_PATH.exists()
-
-        with VOCAB_CSV_PATH.open("a", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "saved_at",
-                    "word",
-                    "dictionary_term",
-                    "root_hint",
-                    "stem_hint",
-                    "normalized",
-                    "pattern_hint",
-                    "sentence",
-                    "definition",
-                    "book",
-                    "chapter",
-                    "notes",
-                ],
-            )
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(
-                {
-                    "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
-                    "word": record.clicked_word,
-                    "dictionary_term": record.term_used,
-                    "root_hint": analysis.likely_root,
-                    "stem_hint": analysis.stem,
-                    "normalized": analysis.normalized,
-                    "pattern_hint": analysis.pattern,
-                    "sentence": record.sentence,
-                    "definition": " ".join(record.definition.split()),
-                    "book": record.book,
-                    "chapter": record.chapter,
-                    "notes": analysis.notes,
-                }
-            )
-
-        self.statusBar().showMessage(f"Saved word to {VOCAB_CSV_PATH}")
-        QMessageBox.information(self, "Saved word", f"Saved to:\n{VOCAB_CSV_PATH}")
-
-    def open_vocab_csv(self) -> None:
-        VOCAB_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-        if not VOCAB_CSV_PATH.exists():
-            with VOCAB_CSV_PATH.open("w", encoding="utf-8-sig", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "saved_at",
-                    "word",
-                    "dictionary_term",
-                    "root_hint",
-                    "stem_hint",
-                    "normalized",
-                    "pattern_hint",
-                    "sentence",
-                    "definition",
-                    "book",
-                    "chapter",
-                    "notes",
-                ])
-        os.system(f"open '{VOCAB_CSV_PATH}' >/dev/null 2>&1 &")
+        self.lookup_popup.show_lookup(clicked_word, term_used, definition)
 
     def _sync_chapter_from_path(self, local_path: str) -> None:
         path = Path(local_path)
