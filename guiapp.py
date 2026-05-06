@@ -9,7 +9,12 @@ Features
 - Font zoom controls
 - Find-in-chapter search
 - Click any word to show the macOS Dictionary Services result
-- Uses Apple Dictionary.app dictionaries, including Oxford Arabic if enabled in Dictionary.app
+- Optional macOS Dictionary.app lookup mode through dict://word
+- Save vocabulary to a local SQLite database
+- Edit the saved definition and note before saving
+- Blue-highlight saved words when reopening the same EPUB
+- Toggle between showing Dictionary definition and your saved definition
+- Export saved vocabulary to CSV for review or Anki import
 
 macOS setup
     python3 -m venv epubdict-env
@@ -25,15 +30,20 @@ Put the Oxford Arabic dictionary higher in the list if you want it to be preferr
 
 from __future__ import annotations
 
+import csv
+import datetime as dt
+import hashlib
 import html
+import json
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from urllib.parse import unquote, urlparse, parse_qs
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 try:
     import ebooklib
@@ -60,6 +70,7 @@ try:
     from PyQt6.QtWidgets import (
         QApplication,
         QFileDialog,
+        QDialog,
         QFrame,
         QHBoxLayout,
         QLabel,
@@ -87,6 +98,10 @@ except ImportError as exc:
 
 APP_ORG = "LocalTools"
 APP_NAME = "ArabicEpubDictionaryReader"
+
+APP_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / APP_NAME
+VOCAB_DB_PATH = APP_SUPPORT_DIR / "vocabulary.sqlite3"
+VOCAB_CSV_PATH = Path.home() / "Documents" / "arabic_epub_vocab.csv"
 
 ARABIC_DIACRITICS_RE = re.compile(
     r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]"
@@ -121,12 +136,20 @@ img, svg, video {
 .lookup-word {
     cursor: pointer;
     border-radius: 4px;
+    padding: 0 1px;
 }
 .lookup-word:hover {
     background: rgba(255, 220, 120, 0.55);
 }
 .lookup-word-active {
-    background: rgba(255, 210, 80, 0.75);
+    background: rgba(255, 210, 80, 0.75) !important;
+}
+.lookup-word-saved {
+    background: rgba(80, 155, 255, 0.24);
+    box-shadow: inset 0 -0.22em rgba(60, 135, 235, 0.70);
+}
+.lookup-word-saved:hover {
+    background: rgba(80, 155, 255, 0.38);
 }
 ::selection {
     background: #ffe8a3;
@@ -144,69 +167,24 @@ WORD_AT_POINT_JS = r"""
             .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
             .replace(/^[\s.,;:!?()\[\]{}<>"'“”‘’،؛؟«»…ـ]+/g, "")
             .replace(/[\s.,;:!?()\[\]{}<>"'“”‘’،؛؟«»…ـ]+$/g, "")
+            .replace(/\s+/g, " ")
             .trim();
     }
 
     const selection = window.getSelection ? window.getSelection().toString().trim() : "";
     if (selection && selection.length <= 80) {
-        return clean(selection.split(/\s+/)[0]);
+        return {word: clean(selection.split(/\s+/)[0])};
     }
 
     const el = document.elementFromPoint(x, y);
     if (el && el.closest) {
         const span = el.closest(".lookup-word");
         if (span && span.dataset && span.dataset.word) {
-            return clean(span.dataset.word);
+            return {word: clean(span.dataset.word)};
         }
     }
 
-    let range = null;
-    if (document.caretRangeFromPoint) {
-        range = document.caretRangeFromPoint(x, y);
-    } else if (document.caretPositionFromPoint) {
-        const pos = document.caretPositionFromPoint(x, y);
-        if (pos) {
-            range = document.createRange();
-            range.setStart(pos.offsetNode, pos.offset);
-            range.collapse(true);
-        }
-    }
-
-    if (!range || !range.startContainer) return "";
-
-    let node = range.startContainer;
-    let offset = range.startOffset;
-
-    function firstTextNode(n) {
-        if (!n) return null;
-        if (n.nodeType === Node.TEXT_NODE) return n;
-        for (const child of n.childNodes || []) {
-            const found = firstTextNode(child);
-            if (found) return found;
-        }
-        return null;
-    }
-
-    if (node.nodeType !== Node.TEXT_NODE) {
-        node = firstTextNode(node.childNodes ? node.childNodes[offset] : node) || firstTextNode(node);
-        offset = 0;
-    }
-
-    if (!node || node.nodeType !== Node.TEXT_NODE) return "";
-
-    const text = node.textContent || "";
-    const wordRe = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFFA-Za-zÀ-ÖØ-öø-ÿ0-9’'\-]+/g;
-
-    let match;
-    while ((match = wordRe.exec(text)) !== null) {
-        const start = match.index;
-        const end = start + match[0].length;
-        if (offset >= start && offset <= end) {
-            return clean(match[0]);
-        }
-    }
-
-    return "";
+    return {word: ""};
 })();
 """
 
@@ -224,7 +202,28 @@ INSTALL_WORD_LOOKUP_JS = r"""
             .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
             .replace(/^[\s.,;:!?()\[\]{}<>"'“”‘’،؛؟«»…ـ]+/g, "")
             .replace(/[\s.,;:!?()\[\]{}<>"'“”‘’،؛؟«»…ـ]+$/g, "")
+            .replace(/\s+/g, " ")
             .trim();
+    }
+
+    function normalizeArabic(s) {
+        return clean(s)
+            .replace(/[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]/g, "")
+            .replace(/ـ/g, "")
+            .replace(/[ٱآأإ]/g, "ا")
+            .replace(/ى/g, "ي");
+    }
+
+    window.__arabicReaderNormalize = normalizeArabic;
+
+    function markIfSaved(span) {
+        const norm = normalizeArabic(span.dataset.word || span.textContent || "");
+        span.dataset.norm = norm;
+        if (window.__arabicReaderSavedWords && window.__arabicReaderSavedWords.has(norm)) {
+            span.classList.add("lookup-word-saved");
+        } else {
+            span.classList.remove("lookup-word-saved");
+        }
     }
 
     function shouldSkip(node) {
@@ -254,6 +253,7 @@ INSTALL_WORD_LOOKUP_JS = r"""
             span.className = "lookup-word";
             span.dataset.word = clean(raw);
             span.textContent = raw;
+            markIfSaved(span);
             frag.appendChild(span);
             lastIndex = start + raw.length;
         }
@@ -297,6 +297,50 @@ class Chapter:
     file_path: Path
 
 
+@dataclass
+class SavedVocab:
+    id: int
+    book_id: str
+    normalized_word: str
+    word: str
+    dictionary_term: str
+    saved_definition: str
+    dictionary_definition: str
+    note: str
+    book_title: str
+    chapter_title: str
+    chapter_index: int
+    saved_at: str
+    updated_at: str
+
+
+@dataclass
+class LookupRecord:
+    clicked_word: str = ""
+    normalized_word: str = ""
+    term_used: str = ""
+    dictionary_definition: str = ""
+    book_id: str = ""
+    book_title: str = ""
+    chapter: str = ""
+    chapter_index: int = -1
+    saved: Optional[SavedVocab] = None
+    displayed_definition: str = ""
+    displayed_source: str = "Dictionary"
+
+
+def app_now() -> str:
+    return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def calculate_file_hash(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def safe_output_path(base_dir: Path, item_name: str) -> Path:
     """Prevent path traversal when extracting EPUB resources."""
     clean_name = item_name.replace("\\", "/").lstrip("/")
@@ -313,6 +357,15 @@ def clean_lookup_word(word: str) -> str:
     word = word.replace("\u0640", "")  # tatweel
     word = re.sub(r"\s+", " ", word)
     return word.strip(TRIM_CHARS)
+
+
+def normalize_arabic(word: str) -> str:
+    word = clean_lookup_word(word)
+    word = ARABIC_DIACRITICS_RE.sub("", word)
+    word = word.replace("ـ", "")
+    word = word.replace("ٱ", "ا").replace("آ", "ا").replace("أ", "ا").replace("إ", "ا")
+    word = word.replace("ى", "ي")
+    return word
 
 
 def lookup_variants(word: str) -> list[str]:
@@ -357,26 +410,22 @@ def dictionary_lookup(word: str) -> tuple[str, str]:
     return word, "No definition found in the active macOS dictionaries."
 
 
-def format_dictionary_definition_html(term: str, definition: str) -> str:
+def definition_text_to_readable_html(definition: str) -> str:
     """
     Apple Dictionary Services returns plain text, not the rich layout used by Dictionary.app.
     This adds readable line breaks and simple HTML formatting.
     """
     raw = (definition or "").strip()
     if not raw:
-        raw = "No definition found in the active macOS dictionaries."
+        raw = "No definition available."
 
     nl = chr(10)
     text = " ".join(raw.split())
-
-    # Dictionary.app entries often contain triangle bullets for subentries/examples.
     text = text.replace("▸", nl + "    ▸ ")
 
-    # Put numbered senses on separate lines.
     for number in range(1, 30):
         text = text.replace(" " + str(number) + " ", nl + str(number) + " ")
 
-    # Put common parts of speech on separate lines.
     for pos in ["noun", "verb", "adjective", "adverb", "plural", "preposition", "conjunction", "interjection"]:
         text = text.replace(" " + pos + " ", nl + pos + " ")
 
@@ -388,7 +437,7 @@ def format_dictionary_definition_html(term: str, definition: str) -> str:
     for i, line in enumerate(parts):
         escaped = html.escape(line)
         if i == 0:
-            escaped = escaped.replace(" | ", " <span style='color:#777'>|</span> ")
+            escaped = escaped.replace(" | ", " <span class='bar'>|</span> ")
             html_lines.append("<div class='entry-head'>" + escaped + "</div>")
         elif line.lstrip().startswith("▸"):
             html_lines.append("<div class='subentry'>" + escaped + "</div>")
@@ -398,57 +447,327 @@ def format_dictionary_definition_html(term: str, definition: str) -> str:
             html_lines.append("<div class='pos'>" + escaped + "</div>")
         else:
             html_lines.append("<div>" + escaped + "</div>")
+    return "".join(html_lines)
 
-    return """
+
+def plain_text_to_user_html(text: str) -> str:
+    lines = (text or "").splitlines() or [text or ""]
+    return "".join("<div>" + html.escape(line) + "</div>" for line in lines)
+
+
+def format_lookup_html(record: LookupRecord) -> str:
+    word = html.escape(record.clicked_word)
+    term = html.escape(record.term_used or record.clicked_word)
+    book_title = html.escape(record.book_title or "")
+    chapter = html.escape(record.chapter or "")
+    source = html.escape(record.displayed_source)
+    note = html.escape(record.saved.note if record.saved else "")
+    saved_status = "Saved word" if record.saved else "Not saved yet"
+    saved_status_class = "saved" if record.saved else "unsaved"
+
+    if record.displayed_source == "Saved definition":
+        definition_body = plain_text_to_user_html(record.displayed_definition)
+    else:
+        definition_body = definition_text_to_readable_html(record.displayed_definition)
+
+    note_block = ""
+    if record.saved and note:
+        note_block = f"""
+        <div class="section">
+            <div class="label">Saved note</div>
+            <div class="note">{note}</div>
+        </div>
+        """
+
+    return f"""
     <html>
     <head>
     <style>
-        body {
+        body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Geeza Pro', 'Arial', sans-serif;
-            font-size: 18px;
+            font-size: 16px;
             line-height: 1.45;
             margin: 0;
             padding: 4px;
             color: #111;
             background: #fff;
-        }
-        .entry-head {
+        }}
+        .section {{
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 10px;
+            margin-bottom: 12px;
+        }}
+        .label {{
+            font-weight: 700;
+            color: #555;
+            margin-bottom: 4px;
+            direction: ltr;
+        }}
+        .word {{
+            font-size: 25px;
+            font-weight: 800;
+            direction: rtl;
+            unicode-bidi: plaintext;
+        }}
+        .meta {{
+            color: #666;
+            margin-top: 4px;
+        }}
+        .saved {{
+            color: #0b63ce;
+            font-weight: 800;
+        }}
+        .unsaved {{
+            color: #777;
+            font-weight: 700;
+        }}
+        .note {{
+            direction: rtl;
+            unicode-bidi: plaintext;
+            background: #f3f8ff;
+            border: 1px solid #bcd7ff;
+            border-radius: 8px;
+            padding: 8px;
+            white-space: pre-wrap;
+        }}
+        .entry-head {{
             font-size: 20px;
             font-weight: 700;
             margin-bottom: 10px;
             direction: rtl;
             unicode-bidi: plaintext;
-        }
-        .pos {
+        }}
+        .pos {{
             font-weight: 700;
             color: #444;
             margin-top: 8px;
             margin-bottom: 4px;
             direction: ltr;
             unicode-bidi: plaintext;
-        }
-        .sense {
+        }}
+        .sense {{
             margin-top: 8px;
             margin-bottom: 4px;
             font-weight: 600;
             direction: rtl;
             unicode-bidi: plaintext;
-        }
-        .subentry {
+        }}
+        .subentry {{
             margin-right: 22px;
             margin-top: 4px;
             direction: rtl;
             unicode-bidi: plaintext;
-        }
-        div {
+        }}
+        .bar {{ color: #777; }}
+        div {{
             white-space: normal;
             overflow-wrap: anywhere;
-        }
+        }}
     </style>
     </head>
-    <body>""" + "".join(html_lines) + """</body>
+    <body>
+        <div class="section">
+            <div class="label">Word</div>
+            <div class="word">{word}</div>
+            <div class="meta">Dictionary term: {term}</div>
+            <div class="meta {saved_status_class}">{saved_status}</div>
+            <div class="meta">Book: {book_title}</div>
+            <div class="meta">Chapter: {chapter}</div>
+        </div>
+        {note_block}
+        <div class="section">
+            <div class="label">Showing: {source}</div>
+            {definition_body}
+        </div>
+    </body>
     </html>
     """
+
+
+class VocabularyStore:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS books (
+                    book_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vocab (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id TEXT NOT NULL,
+                    normalized_word TEXT NOT NULL,
+                    word TEXT NOT NULL,
+                    dictionary_term TEXT,
+                    saved_definition TEXT NOT NULL,
+                    dictionary_definition TEXT,
+                    note TEXT,
+                    book_title TEXT,
+                    chapter_title TEXT,
+                    chapter_index INTEGER,
+                    saved_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(book_id, normalized_word),
+                    FOREIGN KEY(book_id) REFERENCES books(book_id)
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_vocab_book ON vocab(book_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_vocab_word ON vocab(book_id, normalized_word)")
+
+    def upsert_book(self, book_id: str, title: str, file_name: str, file_path: str) -> None:
+        now = app_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO books(book_id, title, file_name, file_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id) DO UPDATE SET
+                    title=excluded.title,
+                    file_name=excluded.file_name,
+                    file_path=excluded.file_path,
+                    updated_at=excluded.updated_at
+                """,
+                (book_id, title, file_name, file_path, now, now),
+            )
+
+    def saved_words_for_book(self, book_id: str) -> list[str]:
+        if not book_id:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT normalized_word FROM vocab WHERE book_id = ? ORDER BY normalized_word",
+                (book_id,),
+            ).fetchall()
+        return [str(row["normalized_word"]) for row in rows]
+
+    def get_saved_word(self, book_id: str, normalized_word: str) -> Optional[SavedVocab]:
+        if not book_id or not normalized_word:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM vocab WHERE book_id = ? AND normalized_word = ?",
+                (book_id, normalized_word),
+            ).fetchone()
+        return self._row_to_vocab(row) if row else None
+
+    def save_word(self, record: LookupRecord, saved_definition: str, note: str) -> None:
+        now = app_now()
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT id, saved_at FROM vocab WHERE book_id = ? AND normalized_word = ?",
+                (record.book_id, record.normalized_word),
+            ).fetchone()
+            saved_at = str(existing["saved_at"]) if existing else now
+            conn.execute(
+                """
+                INSERT INTO vocab(
+                    book_id, normalized_word, word, dictionary_term,
+                    saved_definition, dictionary_definition, note,
+                    book_title, chapter_title, chapter_index,
+                    saved_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, normalized_word) DO UPDATE SET
+                    word=excluded.word,
+                    dictionary_term=excluded.dictionary_term,
+                    saved_definition=excluded.saved_definition,
+                    dictionary_definition=excluded.dictionary_definition,
+                    note=excluded.note,
+                    book_title=excluded.book_title,
+                    chapter_title=excluded.chapter_title,
+                    chapter_index=excluded.chapter_index,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    record.book_id,
+                    record.normalized_word,
+                    record.clicked_word,
+                    record.term_used,
+                    saved_definition,
+                    record.dictionary_definition,
+                    note,
+                    record.book_title,
+                    record.chapter,
+                    record.chapter_index,
+                    saved_at,
+                    now,
+                ),
+            )
+
+    def delete_word(self, book_id: str, normalized_word: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM vocab WHERE book_id = ? AND normalized_word = ?",
+                (book_id, normalized_word),
+            )
+
+    def export_csv(self, csv_path: Path) -> None:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT saved_at, updated_at, word, normalized_word, dictionary_term,
+                       saved_definition, note, book_title, chapter_title, dictionary_definition
+                FROM vocab
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+
+        with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "saved_at",
+                    "updated_at",
+                    "word",
+                    "normalized_word",
+                    "dictionary_term",
+                    "saved_definition",
+                    "note",
+                    "book_title",
+                    "chapter_title",
+                    "dictionary_definition",
+                ],
+            )
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: row[key] for key in writer.fieldnames})
+
+    def _row_to_vocab(self, row: sqlite3.Row) -> SavedVocab:
+        return SavedVocab(
+            id=int(row["id"]),
+            book_id=str(row["book_id"]),
+            normalized_word=str(row["normalized_word"]),
+            word=str(row["word"]),
+            dictionary_term=str(row["dictionary_term"] or ""),
+            saved_definition=str(row["saved_definition"] or ""),
+            dictionary_definition=str(row["dictionary_definition"] or ""),
+            note=str(row["note"] or ""),
+            book_title=str(row["book_title"] or ""),
+            chapter_title=str(row["chapter_title"] or ""),
+            chapter_index=int(row["chapter_index"] if row["chapter_index"] is not None else -1),
+            saved_at=str(row["saved_at"]),
+            updated_at=str(row["updated_at"]),
+        )
 
 
 class EpubBook:
@@ -456,10 +775,14 @@ class EpubBook:
         self.path: Optional[Path] = None
         self.tempdir: Optional[tempfile.TemporaryDirectory[str]] = None
         self.chapters: list[Chapter] = []
+        self.book_id: str = ""
+        self.title: str = ""
 
     def close(self) -> None:
         self.chapters = []
         self.path = None
+        self.book_id = ""
+        self.title = ""
         if self.tempdir is not None:
             self.tempdir.cleanup()
             self.tempdir = None
@@ -467,10 +790,12 @@ class EpubBook:
     def open(self, epub_path: str | os.PathLike[str]) -> None:
         self.close()
         self.path = Path(epub_path)
+        self.book_id = calculate_file_hash(self.path)
         self.tempdir = tempfile.TemporaryDirectory(prefix="arabic_epub_reader_")
         out_dir = Path(self.tempdir.name)
 
         book = epub.read_epub(str(self.path))
+        self.title = self._extract_book_title(book) or self.path.stem
 
         # Extract every EPUB item so chapter HTML can load local images/CSS/resources.
         for item in book.get_items():
@@ -557,6 +882,16 @@ class EpubBook:
 
         return str(soup).encode("utf-8")
 
+    def _extract_book_title(self, book: epub.EpubBook) -> str:
+        try:
+            titles = book.get_metadata("DC", "title")
+        except Exception:
+            titles = []
+        for title_item in titles:
+            if title_item and title_item[0]:
+                return str(title_item[0]).strip()
+        return ""
+
     def _extract_title(self, content: bytes, fallback: str) -> str:
         try:
             soup = BeautifulSoup(content, "lxml")
@@ -579,7 +914,8 @@ class ReaderPage(QWebEnginePage):
     def acceptNavigationRequest(self, url: QUrl, nav_type: QWebEnginePage.NavigationType, is_main_frame: bool) -> bool:
         if url.scheme() == "lookup":
             parsed = urlparse(url.toString())
-            query_value = parse_qs(parsed.query).get("value", [""])[0]
+            qs = parse_qs(parsed.query)
+            query_value = qs.get("value", [""])[0]
             word = clean_lookup_word(unquote(query_value))
             if word:
                 self.wordLookupRequested.emit(word)
@@ -619,22 +955,102 @@ class ReaderView(QWebEngineView):
         js = WORD_AT_POINT_JS.replace("__X__", str(x)).replace("__Y__", str(y))
         self.page().runJavaScript(js, self._emit_word_if_any)
 
-    def _emit_word_if_any(self, word: object) -> None:
-        if not isinstance(word, str):
-            return
-        word = clean_lookup_word(word)
+    def _emit_word_if_any(self, payload: object) -> None:
+        word = ""
+        if isinstance(payload, dict):
+            word = clean_lookup_word(str(payload.get("word", "")))
+        elif isinstance(payload, str):
+            word = clean_lookup_word(payload)
         if word:
             self.wordClicked.emit(word)
 
 
+class SaveVocabDialog(QDialog):
+    deletedRequested = pyqtSignal(object)
+
+    def __init__(self, record: LookupRecord, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.record = record
+        self.setWindowTitle("Save vocabulary word")
+        self.resize(720, 560)
+
+        word_label = QLabel(record.clicked_word)
+        word_label.setStyleSheet("font-size: 28px; font-weight: 800;")
+        word_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        meta = QLabel(f"Book: {record.book_title}\nChapter: {record.chapter}")
+        meta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self.definition_edit = QTextEdit()
+        self.definition_edit.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.definition_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.definition_edit.setPlaceholderText("Edit the definition before saving…")
+        initial_definition = record.saved.saved_definition if record.saved else record.dictionary_definition
+        self.definition_edit.setPlainText(initial_definition or "")
+
+        self.note_edit = QTextEdit()
+        self.note_edit.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.note_edit.setMaximumHeight(110)
+        self.note_edit.setPlaceholderText("Optional note, memory aid, grammar note, example, etc.")
+        self.note_edit.setPlainText(record.saved.note if record.saved else "")
+
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self.accept)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        self.delete_btn = QPushButton("Delete saved word")
+        self.delete_btn.setEnabled(record.saved is not None)
+        self.delete_btn.clicked.connect(self._delete_clicked)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.delete_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(cancel_btn)
+        button_row.addWidget(save_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Word"))
+        layout.addWidget(word_label)
+        layout.addWidget(meta)
+        layout.addWidget(QLabel("Saved definition — edit, delete, or add anything before saving"))
+        layout.addWidget(self.definition_edit)
+        layout.addWidget(QLabel("Optional note"))
+        layout.addWidget(self.note_edit)
+        layout.addLayout(button_row)
+
+    def saved_definition(self) -> str:
+        return self.definition_edit.toPlainText().strip()
+
+    def note(self) -> str:
+        return self.note_edit.toPlainText().strip()
+
+    def _delete_clicked(self) -> None:
+        if self.record.saved is None:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete saved word?",
+            f"Delete saved vocabulary entry for '{self.record.clicked_word}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.deletedRequested.emit(self.record)
+            self.reject()
+
+
 class LookupPopup(QFrame):
+    saveRequested = pyqtSignal(object)
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, Qt.WindowType.Popup)
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setMinimumWidth(460)
-        self.setMaximumWidth(760)
-        self.setMinimumHeight(240)
-        self.setMaximumHeight(540)
+        self.setMinimumWidth(500)
+        self.setMaximumWidth(820)
+        self.setMinimumHeight(320)
+        self.setMaximumHeight(640)
 
         self.title = QLabel()
         self.title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -646,6 +1062,9 @@ class LookupPopup(QFrame):
         self.definition.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.definition.setStyleSheet("font-size: 16px; line-height: 1.5;")
 
+        self.save_btn = QPushButton("Save / edit word")
+        self.save_btn.clicked.connect(self._emit_save)
+
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
 
@@ -654,6 +1073,7 @@ class LookupPopup(QFrame):
 
         button_row = QHBoxLayout()
         button_row.addWidget(open_dictionary_btn)
+        button_row.addWidget(self.save_btn)
         button_row.addStretch(1)
         button_row.addWidget(close_btn)
 
@@ -663,15 +1083,22 @@ class LookupPopup(QFrame):
         layout.addLayout(button_row)
 
         self._current_word = ""
+        self._current_record: Optional[LookupRecord] = None
 
-    def show_lookup(self, clicked_word: str, term_used: str, definition: str) -> None:
+    def show_lookup(self, record: LookupRecord) -> None:
+        self._current_record = record
+        clicked_word = record.clicked_word
+        term_used = record.term_used
         self._current_word = term_used or clicked_word
+        self.save_btn.setText("Edit saved word" if record.saved else "Save word")
+
         if term_used and term_used != clicked_word:
             self.title.setText(f"{clicked_word}  →  {term_used}")
         else:
             self.title.setText(clicked_word)
-        self.definition.setHtml(format_dictionary_definition_html(term_used or clicked_word, definition))
-        self.resize(620, 420)
+
+        self.definition.setHtml(format_lookup_html(record))
+        self.resize(680, 520)
         self.adjustSize()
 
         cursor_pos = QCursor.pos()
@@ -692,11 +1119,14 @@ class LookupPopup(QFrame):
         self.raise_()
         self.activateWindow()
 
+    def _emit_save(self) -> None:
+        if self._current_record is not None:
+            self.saveRequested.emit(self._current_record)
+
     def open_in_dictionary_app(self) -> None:
         if not self._current_word:
             return
-        # macOS supports dict:// URLs for Dictionary.app.
-        os.system(f"open 'dict://{self._current_word}' >/dev/null 2>&1 &")
+        os.system(f"open 'dict://{quote(self._current_word)}' >/dev/null 2>&1 &")
 
 
 class MainWindow(QMainWindow):
@@ -706,10 +1136,12 @@ class MainWindow(QMainWindow):
         self.resize(1200, 820)
 
         self.settings = QSettings(APP_ORG, APP_NAME)
+        self.vocab_store = VocabularyStore(VOCAB_DB_PATH)
         self.book = EpubBook()
         self.current_chapter_index = -1
         self.zoom_factor = float(self.settings.value("zoom_factor", 1.0))
         self.lookup_mode = str(self.settings.value("lookup_mode", "popup"))  # popup | dictionary_app
+        self.definition_mode = str(self.settings.value("definition_mode", "dictionary"))  # dictionary | saved
 
         self.chapter_list = QListWidget()
         self.chapter_list.setMaximumWidth(320)
@@ -733,6 +1165,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(splitter)
 
         self.lookup_popup = LookupPopup(self)
+        self.lookup_popup.saveRequested.connect(self.open_save_vocabulary_dialog)
         self.find_box = QLineEdit()
         self.find_box.setPlaceholderText("Find in chapter…")
         self.find_box.returnPressed.connect(self.find_next)
@@ -749,6 +1182,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 - Qt method name
         self.settings.setValue("zoom_factor", self.zoom_factor)
+        self.settings.setValue("definition_mode", self.definition_mode)
         if self.book.path:
             self.settings.setValue("last_epub_path", str(self.book.path))
             self.settings.setValue(f"last_chapter::{self.book.path}", self.current_chapter_index)
@@ -814,6 +1248,18 @@ class MainWindow(QMainWindow):
         self.lookup_mode_action.triggered.connect(self.toggle_lookup_mode)
         toolbar.addAction(self.lookup_mode_action)
 
+        self.definition_mode_action = QAction(self._definition_mode_label(), self)
+        self.definition_mode_action.setToolTip(
+            "When a word is already saved, choose whether clicking it shows your saved definition or a fresh dictionary lookup."
+        )
+        self.definition_mode_action.triggered.connect(self.toggle_definition_mode)
+        toolbar.addAction(self.definition_mode_action)
+
+        export_action = QAction("Export vocab CSV", self)
+        export_action.setToolTip(f"Exports vocabulary from SQLite to {VOCAB_CSV_PATH}")
+        export_action.triggered.connect(self.export_vocab_csv)
+        toolbar.addAction(export_action)
+
     def choose_epub(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -831,13 +1277,20 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not open EPUB", str(exc))
             return
 
+        self.vocab_store.upsert_book(
+            book_id=self.book.book_id,
+            title=self.book.title,
+            file_name=self.book.path.name if self.book.path else "",
+            file_path=str(self.book.path) if self.book.path else "",
+        )
+
         self.chapter_list.blockSignals(True)
         self.chapter_list.clear()
         for chapter in self.book.chapters:
             self.chapter_list.addItem(chapter.title)
         self.chapter_list.blockSignals(False)
 
-        self.setWindowTitle(f"Arabic EPUB Dictionary Reader — {Path(path).name}")
+        self.setWindowTitle(f"Arabic EPUB Dictionary Reader — {self.book.title or Path(path).name}")
         self.settings.setValue("last_epub_path", path)
 
         chapter_index = 0
@@ -871,7 +1324,33 @@ class MainWindow(QMainWindow):
     def install_word_click_handler(self, ok: bool) -> None:
         if not ok:
             return
-        self.reader_view.page().runJavaScript(INSTALL_WORD_LOOKUP_JS)
+        self.reader_view.page().runJavaScript(
+            INSTALL_WORD_LOOKUP_JS,
+            lambda _result: self.apply_saved_word_highlights(),
+        )
+
+    def apply_saved_word_highlights(self) -> None:
+        if not self.book.book_id:
+            return
+        words = self.vocab_store.saved_words_for_book(self.book.book_id)
+        words_json = json.dumps(words, ensure_ascii=False)
+        js = f"""
+        (function() {{
+            const words = {words_json};
+            const norm = window.__arabicReaderNormalize || function(s) {{ return s || ''; }};
+            window.__arabicReaderSavedWords = new Set(words.map(norm));
+            document.querySelectorAll('.lookup-word').forEach(function(el) {{
+                const n = norm(el.dataset.word || el.textContent || '');
+                el.dataset.norm = n;
+                if (window.__arabicReaderSavedWords.has(n)) {{
+                    el.classList.add('lookup-word-saved');
+                }} else {{
+                    el.classList.remove('lookup-word-saved');
+                }}
+            }});
+        }})();
+        """
+        self.reader_view.page().runJavaScript(js)
 
     def previous_chapter(self) -> None:
         self.load_chapter(self.current_chapter_index - 1)
@@ -913,13 +1392,27 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("Lookup mode: in-app popup")
 
+    def _definition_mode_label(self) -> str:
+        if getattr(self, "definition_mode", "dictionary") == "saved":
+            return "Definition: Saved"
+        return "Definition: Dictionary"
+
+    def toggle_definition_mode(self) -> None:
+        self.definition_mode = "saved" if self.definition_mode == "dictionary" else "dictionary"
+        self.settings.setValue("definition_mode", self.definition_mode)
+        self.definition_mode_action.setText(self._definition_mode_label())
+        self.statusBar().showMessage(f"{self._definition_mode_label()} mode")
+
     def open_word_in_dictionary_app(self, word: str) -> None:
         word = clean_lookup_word(word)
         if not word:
             return
-        # macOS Dictionary.app supports dict:// URLs. This is more reliable from PyQt
-        # than trying to invoke the native Force Click lookup popover inside QWebEngine.
-        os.system(f"open 'dict://{word}' >/dev/null 2>&1 &")
+        os.system(f"open 'dict://{quote(word)}' >/dev/null 2>&1 &")
+
+    def current_chapter_title(self) -> str:
+        if 0 <= self.current_chapter_index < len(self.book.chapters):
+            return self.book.chapters[self.current_chapter_index].title
+        return ""
 
     def lookup_word(self, clicked_word: str) -> None:
         clicked_word = clean_lookup_word(clicked_word)
@@ -930,8 +1423,60 @@ class MainWindow(QMainWindow):
             self.open_word_in_dictionary_app(clicked_word)
             return
 
-        term_used, definition = dictionary_lookup(clicked_word)
-        self.lookup_popup.show_lookup(clicked_word, term_used, definition)
+        normalized_word = normalize_arabic(clicked_word)
+        saved = self.vocab_store.get_saved_word(self.book.book_id, normalized_word)
+        term_used, dictionary_definition = dictionary_lookup(clicked_word)
+
+        show_saved = self.definition_mode == "saved" and saved is not None
+        displayed_definition = saved.saved_definition if show_saved else dictionary_definition
+        displayed_source = "Saved definition" if show_saved else "Dictionary"
+
+        record = LookupRecord(
+            clicked_word=clicked_word,
+            normalized_word=normalized_word,
+            term_used=term_used,
+            dictionary_definition=dictionary_definition,
+            book_id=self.book.book_id,
+            book_title=self.book.title or (self.book.path.stem if self.book.path else ""),
+            chapter=self.current_chapter_title(),
+            chapter_index=self.current_chapter_index,
+            saved=saved,
+            displayed_definition=displayed_definition,
+            displayed_source=displayed_source,
+        )
+        self.lookup_popup.show_lookup(record)
+
+    def open_save_vocabulary_dialog(self, record_obj: object) -> None:
+        if not isinstance(record_obj, LookupRecord):
+            return
+        record = record_obj
+
+        # Refresh the saved state in case it changed since the popup opened.
+        record.saved = self.vocab_store.get_saved_word(record.book_id, record.normalized_word)
+
+        dialog = SaveVocabDialog(record, self)
+        dialog.deletedRequested.connect(self.delete_vocabulary_record)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            saved_definition = dialog.saved_definition()
+            if not saved_definition:
+                QMessageBox.warning(self, "Definition required", "Please enter a definition before saving.")
+                return
+            self.vocab_store.save_word(record, saved_definition=saved_definition, note=dialog.note())
+            self.apply_saved_word_highlights()
+            self.statusBar().showMessage(f"Saved '{record.clicked_word}' to vocabulary database")
+            QMessageBox.information(self, "Saved word", f"Saved '{record.clicked_word}'.")
+
+    def delete_vocabulary_record(self, record_obj: object) -> None:
+        if not isinstance(record_obj, LookupRecord):
+            return
+        self.vocab_store.delete_word(record_obj.book_id, record_obj.normalized_word)
+        self.apply_saved_word_highlights()
+        self.statusBar().showMessage(f"Deleted saved word '{record_obj.clicked_word}'")
+
+    def export_vocab_csv(self) -> None:
+        self.vocab_store.export_csv(VOCAB_CSV_PATH)
+        os.system(f"open '{VOCAB_CSV_PATH}' >/dev/null 2>&1 &")
+        self.statusBar().showMessage(f"Exported vocabulary CSV to {VOCAB_CSV_PATH}")
 
     def _sync_chapter_from_path(self, local_path: str) -> None:
         path = Path(local_path)
