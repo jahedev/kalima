@@ -6,21 +6,25 @@ GitHub: https://github.com/jahedev/arabic-epub-dict-macos
 
 ## ✨ Features
 
-- 📚 Open and read Arabic `.epub` files
-- ↩️ Right-to-left Arabic reading layout
-- 🧭 Chapter/sidebar navigation
-- 🔎 Search inside the current chapter
-- 🔠 Font zoom controls
-- 🖱️ Click any word for a dictionary popup
-- 🍎 Optional mode to open words in macOS Dictionary.app
-- 💾 Save vocabulary to a local SQLite database
-- ✍️ Edit the definition before saving
-- 📝 Add optional notes
-- 🔵 Saved words are highlighted blue in the EPUB
-- 🔁 Reopen the same EPUB and saved highlights return
-- 🔀 Toggle between live dictionary definitions and your saved definitions
-- 📤 Export vocabulary to CSV
-- 🧠 Export saved words to Anki HTML import format
+* Open and read Arabic EPUB files
+* Right-to-left Arabic reading layout
+* Chapter/sidebar navigation
+* Font zoom controls
+* Search inside the current chapter
+* Click any word to show a dictionary popup
+* Optional lookup mode that opens macOS Dictionary.app
+* Save vocabulary to a local SQLite database
+* Edit the definition before saving
+* Add optional notes to saved words
+* Delete saved vocabulary entries
+* Saved words are highlighted blue in the EPUB
+* Reopening the same EPUB restores saved-word highlights
+* Toggle between showing:
+
+  * live Dictionary.app definition
+  * your saved definition
+* Export vocabulary to CSV
+* Export Anki-ready HTML import file
 
 ## 🍎 macOS Dictionary Setup
 
@@ -93,9 +97,20 @@ Saved vocabulary is stored locally in SQLite:
 ~/Library/Application Support/ArabicEpubDictionaryReader/vocabulary.sqlite3
 ```
 
-Each saved word stores the word, normalized word, dictionary term, edited definition, original dictionary definition, optional note, book title, chapter title, and timestamps.
+Each saved entry stores:
 
-The app remembers EPUBs using a SHA-256 hash of the file, so reopening the same book restores blue highlights for saved words.
+* word
+* normalized word
+* dictionary term
+* saved definition
+* original dictionary definition
+* optional note
+* book title
+* chapter title
+* chapter index
+* saved/updated timestamps
+
+EPUBs are remembered using a SHA-256 hash of the file, so reopening the same EPUB restores saved highlights.
 
 ## 🔀 Definition Toggle
 
@@ -122,17 +137,31 @@ Click **Export Anki HTML** to create:
 ~/Documents/arabic_epub_anki_import.txt
 ```
 
-Anki card format:
+The Anki export uses:
 
-- **Front:** Arabic word only
-- **Back:** saved definition as HTML
+```text
+#separator:Tab
+#html:true
+#columns:Front	Back
+```
 
-Import in Anki using **File > Import**, then map `Front` to Front and `Back` to Back. Keep HTML enabled if prompted.
+Card format:
+
+* **Front:** Arabic word only
+* **Back:** saved definition as HTML
+
+In Anki:
+
+1. Go to **File > Import**
+2. Choose `arabic_epub_anki_import.txt`
+3. Use a Basic note type
+4. Map `Front` to Front and `Back` to Back
+5. Keep HTML enabled if prompted
 
 ## ⚠️ Notes
 
 Apple’s Dictionary Services API returns plain-text dictionary output, not the full rich Dictionary.app layout. This app reformats the result to make it easier to read, but it may not look exactly like Dictionary.app.
 
-## 📄 License
+## License
 
-Add your preferred license before publishing publicly.
+Personal project. Add your preferred license before publishing publicly.
