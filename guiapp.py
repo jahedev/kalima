@@ -485,33 +485,33 @@ def format_lookup_html(record: LookupRecord) -> str:
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Geeza Pro', 'Arial', sans-serif;
-            font-size: 16px;
-            line-height: 1.45;
+            font-size: 17px;
+            line-height: 1.38;
             margin: 0;
-            padding: 4px;
+            padding: 0;
             color: #111;
             background: #fff;
         }}
         .section {{
             border-bottom: 1px solid #ddd;
-            padding-bottom: 10px;
-            margin-bottom: 12px;
+            padding-bottom: 7px;
+            margin-bottom: 8px;
         }}
         .label {{
             font-weight: 700;
             color: #555;
-            margin-bottom: 4px;
+            margin-bottom: 3px;
             direction: ltr;
         }}
         .word {{
-            font-size: 25px;
+            font-size: 23px;
             font-weight: 800;
             direction: rtl;
             unicode-bidi: plaintext;
         }}
         .meta {{
             color: #666;
-            margin-top: 4px;
+            margin-top: 2px;
         }}
         .saved {{
             color: #0b63ce;
@@ -531,30 +531,30 @@ def format_lookup_html(record: LookupRecord) -> str:
             white-space: pre-wrap;
         }}
         .entry-head {{
-            font-size: 20px;
+            font-size: 21px;
             font-weight: 700;
-            margin-bottom: 10px;
+            margin-bottom: 7px;
             direction: rtl;
             unicode-bidi: plaintext;
         }}
         .pos {{
             font-weight: 700;
             color: #444;
-            margin-top: 8px;
-            margin-bottom: 4px;
+            margin-top: 6px;
+            margin-bottom: 2px;
             direction: ltr;
             unicode-bidi: plaintext;
         }}
         .sense {{
-            margin-top: 8px;
-            margin-bottom: 4px;
+            margin-top: 6px;
+            margin-bottom: 2px;
             font-weight: 600;
             direction: rtl;
             unicode-bidi: plaintext;
         }}
         .subentry {{
-            margin-right: 22px;
-            margin-top: 4px;
+            margin-right: 18px;
+            margin-top: 2px;
             direction: rtl;
             unicode-bidi: plaintext;
         }}
@@ -567,6 +567,12 @@ def format_lookup_html(record: LookupRecord) -> str:
     </head>
     <body>
         <div class="section">
+            <div class="label">Showing: {source}</div>
+            {definition_body}
+        </div>
+        {note_block}
+        <!--
+        <div class="section">
             <div class="label">Word</div>
             <div class="word">{word}</div>
             <div class="meta">Dictionary term: {term}</div>
@@ -574,11 +580,7 @@ def format_lookup_html(record: LookupRecord) -> str:
             <div class="meta">Book: {book_title}</div>
             <div class="meta">Chapter: {chapter}</div>
         </div>
-        {note_block}
-        <div class="section">
-            <div class="label">Showing: {source}</div>
-            {definition_body}
-        </div>
+        -->
     </body>
     </html>
     """
@@ -1047,10 +1049,10 @@ class LookupPopup(QFrame):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, Qt.WindowType.Popup)
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setMinimumWidth(500)
-        self.setMaximumWidth(820)
-        self.setMinimumHeight(320)
-        self.setMaximumHeight(640)
+        self.setMinimumWidth(650)
+        self.setMaximumWidth(980)
+        self.setMinimumHeight(430)
+        self.setMaximumHeight(760)
 
         self.title = QLabel()
         self.title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -1060,7 +1062,7 @@ class LookupPopup(QFrame):
         self.definition.setReadOnly(True)
         self.definition.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.definition.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        self.definition.setStyleSheet("font-size: 16px; line-height: 1.5;")
+        self.definition.setStyleSheet("font-size: 17px; line-height: 1.35;")
 
         self.save_btn = QPushButton("Save / edit word")
         self.save_btn.clicked.connect(self._emit_save)
@@ -1078,6 +1080,8 @@ class LookupPopup(QFrame):
         button_row.addWidget(close_btn)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
         layout.addWidget(self.title)
         layout.addWidget(self.definition)
         layout.addLayout(button_row)
@@ -1098,7 +1102,7 @@ class LookupPopup(QFrame):
             self.title.setText(clicked_word)
 
         self.definition.setHtml(format_lookup_html(record))
-        self.resize(680, 520)
+        self.resize(820, 620)
         self.adjustSize()
 
         cursor_pos = QCursor.pos()
