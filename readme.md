@@ -1,0 +1,156 @@
+# Arabic EPUB Dictionary Reader
+
+A macOS Arabic EPUB reader with clickable word lookup using Apple Dictionary.app. Save vocabulary with editable definitions and notes, highlight saved words in blue, toggle saved vs dictionary definitions, and export saved words to Anki HTML import files.
+
+## Features
+
+* Open and read Arabic EPUB files
+* Right-to-left Arabic reading layout
+* Chapter/sidebar navigation
+* Font zoom controls
+* Search inside the current chapter
+* Click any word to show a dictionary popup
+* Optional lookup mode that opens macOS Dictionary.app
+* Save vocabulary to a local SQLite database
+* Edit the definition before saving
+* Add optional notes to saved words
+* Delete saved vocabulary entries
+* Saved words are highlighted blue in the EPUB
+* Reopening the same EPUB restores saved-word highlights
+* Toggle between showing:
+
+  * live Dictionary.app definition
+  * your saved definition
+* Export vocabulary to CSV
+* Export Anki-ready HTML import file
+
+## macOS Dictionary Setup
+
+Before running the app, enable the Arabic dictionary in macOS:
+
+1. Open **Dictionary.app**
+2. Go to **Dictionary > Settings** or **Preferences**
+3. Enable **Arabic – English** / Oxford Arabic Dictionary if available
+4. Move it higher in the list if you want it preferred
+
+The app uses macOS Dictionary Services, so dictionary results depend on the dictionaries enabled in Dictionary.app.
+
+## Installation
+
+Create a virtual environment:
+
+```bash
+python3 -m venv epubdict-env
+source epubdict-env/bin/activate
+```
+
+Install dependencies:
+
+```bash
+pip install PyQt6 PyQt6-WebEngine ebooklib beautifulsoup4 lxml pyobjc-framework-DictionaryServices
+```
+
+## Running
+
+```bash
+python arabic_epub_dictionary_reader.py
+```
+
+Or, if your file is named differently:
+
+```bash
+python guiapp.py
+```
+
+## Usage
+
+1. Click **Open EPUB**
+2. Choose an Arabic `.epub` file
+3. Click any word in the text
+4. A popup will show the dictionary result
+5. Click **Save word** to edit and save the definition
+6. Saved words are highlighted in blue
+
+## Lookup Modes
+
+The toolbar includes a lookup mode toggle:
+
+* **Lookup: Popup** — shows the in-app popup
+* **Lookup: Dictionary.app** — opens the word in macOS Dictionary.app using `dict://word`
+
+Native macOS Force Click lookup is not reliably exposed through PyQt WebEngine, so Dictionary.app mode is the closest stable option.
+
+## Definition Modes
+
+The toolbar includes a definition toggle:
+
+* **Definition: Dictionary** — always shows the live dictionary result
+* **Definition: Saved** — for saved words, shows your edited saved definition
+
+## Vocabulary Storage
+
+Saved vocabulary is stored locally in SQLite:
+
+```bash
+~/Library/Application Support/ArabicEpubDictionaryReader/vocabulary.sqlite3
+```
+
+Each saved entry stores:
+
+* word
+* normalized word
+* dictionary term
+* saved definition
+* original dictionary definition
+* optional note
+* book title
+* chapter title
+* chapter index
+* saved/updated timestamps
+
+EPUBs are remembered using a SHA-256 hash of the file, so reopening the same EPUB restores saved highlights.
+
+## Export Vocabulary CSV
+
+Click **Export vocab CSV** to export saved vocabulary to:
+
+```bash
+~/Documents/arabic_epub_vocab.csv
+```
+
+## Export to Anki
+
+Click **Export Anki HTML** to create:
+
+```bash
+~/Documents/arabic_epub_anki_import.txt
+```
+
+The Anki export uses:
+
+```text
+#separator:Tab
+#html:true
+#columns:Front	Back
+```
+
+Card format:
+
+* **Front:** Arabic word only
+* **Back:** saved definition as HTML
+
+In Anki:
+
+1. Go to **File > Import**
+2. Choose `arabic_epub_anki_import.txt`
+3. Use a Basic note type
+4. Map `Front` to Front and `Back` to Back
+5. Keep HTML enabled if prompted
+
+## Notes
+
+Apple’s Dictionary Services API returns plain-text dictionary output, not the full rich Dictionary.app layout. The app reformats the result for readability, but it may not exactly match Dictionary.app.
+
+## License
+
+Personal project. Add your preferred license before publishing publicly.
