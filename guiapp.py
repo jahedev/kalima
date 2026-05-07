@@ -146,7 +146,6 @@ img, svg, video {
 }
 .lookup-word-saved {
     background: rgba(80, 155, 255, 0.24);
-    box-shadow: inset 0 -0.22em rgba(60, 135, 235, 0.70);
 }
 .lookup-word-saved:hover {
     background: rgba(80, 155, 255, 0.38);
@@ -286,6 +285,29 @@ INSTALL_WORD_LOOKUP_JS = r"""
 
     return "installed";
 })();
+"""
+
+TOGGLE_TASHKEEL_JS = r"""
+(function(hidden) {
+    function stripTashkeel(s) {
+        return (s || "")
+            .replace(/[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]/g, "");
+    }
+
+    document.querySelectorAll(".lookup-word").forEach(function(el) {
+        if (!el.dataset.originalText) {
+            el.dataset.originalText = el.textContent || "";
+        }
+
+        if (hidden) {
+            el.textContent = stripTashkeel(el.dataset.originalText);
+        } else {
+            el.textContent = el.dataset.originalText;
+        }
+    });
+
+    document.body.classList.toggle("hide-tashkeel", hidden);
+})(__HIDDEN__);
 """
 
 
@@ -603,6 +625,7 @@ def format_lookup_html(record: LookupRecord) -> str:
             {definition_body}
         </div>
         {note_block}
+        <!--
         <div class="section">
             <div class="label">Word</div>
             <div class="word">{word}</div>
@@ -611,10 +634,25 @@ def format_lookup_html(record: LookupRecord) -> str:
             <div class="meta">Book: {book_title}</div>
             <div class="meta">Chapter: {chapter}</div>
         </div>
+        -->
     </body>
     </html>
     """
 
+def get_epub_item_content_safe(item) -> Optional[bytes]:
+    """
+    Some EPUBs list files in the manifest that are missing from the actual archive.
+    Example: EPUB/Fonts/EversonMono.ttf.
+    Skip those broken resources instead of crashing the whole reader.
+    """
+    try:
+        return item.get_content()
+    except KeyError as exc:
+        print(f"Warning: missing EPUB resource skipped: {item.get_name()} ({exc})")
+        return None
+    except Exception as exc:
+        print(f"Warning: could not read EPUB resource skipped: {item.get_name()} ({exc})")
+        return None
 
 class VocabularyStore:
     def __init__(self, db_path: Path) -> None:
@@ -832,11 +870,18 @@ class EpubBook:
         # Extract every EPUB item so chapter HTML can load local images/CSS/resources.
         for item in book.get_items():
             name = item.get_name() or f"item_{id(item)}"
+            content = get_epub_item_content_safe(item)
+
+            # Skip broken/missing resources such as missing fonts.
+            if content is None:
+                continue
+
             target = safe_output_path(out_dir, name)
             target.parent.mkdir(parents=True, exist_ok=True)
-            content = item.get_content()
+
             if item.get_type() == ebooklib.ITEM_DOCUMENT:
                 content = self._prepare_html(content)
+
             target.write_bytes(content)
 
         document_items_by_id = {
@@ -851,7 +896,10 @@ class EpubBook:
             item = document_items_by_id.get(idref)
             if not item:
                 continue
-            title = self._extract_title(item.get_content(), item.get_name())
+            content = get_epub_item_content_safe(item)
+            if content is None:
+                continue
+            title = self._extract_title(content, item.get_name())
             chapters.append(
                 Chapter(
                     idref=idref,
@@ -864,7 +912,10 @@ class EpubBook:
         # Fallback for malformed EPUBs without a useful spine.
         if not chapters:
             for item in document_items_by_id.values():
-                title = self._extract_title(item.get_content(), item.get_name())
+                content = get_epub_item_content_safe(item)
+                if content is None:
+                    continue
+                title = self._extract_title(content, item.get_name())
                 chapters.append(
                     Chapter(
                         idref=item.get_id(),
@@ -1070,28 +1121,40 @@ class SaveVocabDialog(QDialog):
     def _delete_clicked(self) -> None:
         if self.record.saved is None:
             return
-        reply = QMessageBox.question(
-            self,
-            "Delete saved word?",
-            f"Delete saved vocabulary entry for '{self.record.clicked_word}'?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.deletedRequested.emit(self.record)
-            self.reject()
+        
+        # delete without confirmation dialog:
+        self.deletedRequested.emit(self.record)
+        self.reject()
+        
+        # optional confirmation dialog before deleting a saved word:
+        # reply = QMessageBox.question(
+        #     self,
+        #     "Delete saved word?",
+        #     f"Delete saved vocabulary entry for '{self.record.clicked_word}'?",
+        #     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        #     QMessageBox.StandardButton.No,
+        # )
+        # if reply == QMessageBox.StandardButton.Yes:
+        #     self.deletedRequested.emit(self.record)
+        #     self.reject()
+        
 
 
 class LookupPopup(QFrame):
     saveRequested = pyqtSignal(object)
+    closed = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, Qt.WindowType.Popup)
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setMinimumWidth(650)
-        self.setMaximumWidth(980)
-        self.setMinimumHeight(430)
-        self.setMaximumHeight(760)
+        # self.setMinimumWidth(650)
+        # self.setMaximumWidth(980)
+        # self.setMinimumHeight(430)
+        # self.setMaximumHeight(760)
+        self.setMinimumWidth(500)
+        self.setMaximumWidth(550)
+        self.setMinimumHeight(400)
+        self.setMaximumHeight(430)
 
         self.title = QLabel()
         self.title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -1171,6 +1234,10 @@ class LookupPopup(QFrame):
             return
         os.system(f"open 'dict://{quote(self._current_word)}' >/dev/null 2>&1 &")
 
+    def hideEvent(self, event):
+        self.closed.emit()
+        super().hideEvent(event)
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -1185,6 +1252,7 @@ class MainWindow(QMainWindow):
         self.zoom_factor = float(self.settings.value("zoom_factor", 1.0))
         self.lookup_mode = str(self.settings.value("lookup_mode", "popup"))  # popup | dictionary_app
         self.definition_mode = str(self.settings.value("definition_mode", "dictionary"))  # dictionary | saved
+        self.hide_tashkeel = str(self.settings.value("hide_tashkeel", "false")) == "true"
 
         self.chapter_list = QListWidget()
         self.chapter_list.setMaximumWidth(320)
@@ -1209,6 +1277,7 @@ class MainWindow(QMainWindow):
 
         self.lookup_popup = LookupPopup(self)
         self.lookup_popup.saveRequested.connect(self.open_save_vocabulary_dialog)
+        self.lookup_popup.closed.connect(self.remove_active_highlight)
         self.find_box = QLineEdit()
         self.find_box.setPlaceholderText("Find in chapter…")
         self.find_box.returnPressed.connect(self.find_next)
@@ -1269,6 +1338,12 @@ class MainWindow(QMainWindow):
         reset_zoom_action = QAction("Reset", self)
         reset_zoom_action.triggered.connect(self.reset_zoom)
         toolbar.addAction(reset_zoom_action)
+        
+        toolbar.addSeparator()
+        self.tashkeel_action = QAction(self._tashkeel_label(), self)
+        self.tashkeel_action.setToolTip("Toggle Arabic tashkeel/harakat display")
+        self.tashkeel_action.triggered.connect(self.toggle_tashkeel)
+        toolbar.addAction(self.tashkeel_action)
 
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("  Search: "))
@@ -1367,10 +1442,16 @@ class MainWindow(QMainWindow):
     def install_word_click_handler(self, ok: bool) -> None:
         if not ok:
             return
+
         self.reader_view.page().runJavaScript(
             INSTALL_WORD_LOOKUP_JS,
-            lambda _result: self.apply_saved_word_highlights(),
+            lambda _result: self.after_word_handler_installed(),
         )
+
+
+    def after_word_handler_installed(self) -> None:
+        self.apply_saved_word_highlights()
+        self.apply_tashkeel_visibility()
 
     def apply_saved_word_highlights(self) -> None:
         if not self.book.book_id:
@@ -1445,6 +1526,29 @@ class MainWindow(QMainWindow):
         self.settings.setValue("definition_mode", self.definition_mode)
         self.definition_mode_action.setText(self._definition_mode_label())
         self.statusBar().showMessage(f"{self._definition_mode_label()} mode")
+    
+    def _tashkeel_label(self) -> str:
+        return "Show Tashkeel" if self.hide_tashkeel else "Hide Tashkeel"
+
+
+    def toggle_tashkeel(self) -> None:
+        self.hide_tashkeel = not self.hide_tashkeel
+        self.settings.setValue("hide_tashkeel", "true" if self.hide_tashkeel else "false")
+        self.tashkeel_action.setText(self._tashkeel_label())
+        self.apply_tashkeel_visibility()
+
+        if self.hide_tashkeel:
+            self.statusBar().showMessage("Tashkeel hidden")
+        else:
+            self.statusBar().showMessage("Tashkeel shown")
+
+
+    def apply_tashkeel_visibility(self) -> None:
+        js = TOGGLE_TASHKEEL_JS.replace(
+            "__HIDDEN__",
+            "true" if self.hide_tashkeel else "false"
+        )
+        self.reader_view.page().runJavaScript(js)
 
     def open_word_in_dictionary_app(self, word: str) -> None:
         word = clean_lookup_word(word)
@@ -1507,7 +1611,7 @@ class MainWindow(QMainWindow):
             self.vocab_store.save_word(record, saved_definition=saved_definition, note=dialog.note())
             self.apply_saved_word_highlights()
             self.statusBar().showMessage(f"Saved '{record.clicked_word}' to vocabulary database")
-            QMessageBox.information(self, "Saved word", f"Saved '{record.clicked_word}'.")
+            # QMessageBox.information(self, "Saved word", f"Saved '{record.clicked_word}'.")
 
     def delete_vocabulary_record(self, record_obj: object) -> None:
         if not isinstance(record_obj, LookupRecord):
@@ -1520,6 +1624,14 @@ class MainWindow(QMainWindow):
         self.vocab_store.export_csv(VOCAB_CSV_PATH)
         os.system(f"open '{VOCAB_CSV_PATH}' >/dev/null 2>&1 &")
         self.statusBar().showMessage(f"Exported vocabulary CSV to {VOCAB_CSV_PATH}")
+
+    def remove_active_highlight(self) -> None:
+        js = """
+        document.querySelectorAll('.lookup-word-active').forEach(function(el) {
+            el.classList.remove('lookup-word-active');
+        });
+        """
+        self.reader_view.page().runJavaScript(js)
 
     def _sync_chapter_from_path(self, local_path: str) -> None:
         path = Path(local_path)
