@@ -77,6 +77,7 @@ try:
         QLineEdit,
         QListWidget,
         QMainWindow,
+        QMenu,
         QMessageBox,
         QPushButton,
         QSizePolicy,
@@ -152,6 +153,19 @@ img, svg, video {
 }
 ::selection {
     background: #ffe8a3;
+}
+html.reader-dark, html.reader-dark body {
+    background: #1c1c1e !important;
+    color: #e5e5e5 !important;
+}
+html.reader-dark .lookup-word:hover {
+    background: rgba(255, 210, 80, 0.3) !important;
+}
+html.reader-dark .lookup-word-saved {
+    background: rgba(80, 155, 255, 0.18) !important;
+}
+html.reader-dark a {
+    color: #a8c8ff !important;
 }
 """
 
@@ -309,6 +323,14 @@ TOGGLE_TASHKEEL_JS = r"""
     document.body.classList.toggle("hide-tashkeel", hidden);
 })(__HIDDEN__);
 """
+
+APPLY_DARK_MODE_JS = r"""
+(function(dark) {
+    document.documentElement.classList.toggle('reader-dark', dark);
+})(__DARK__);
+"""
+
+MAX_RECENT_FILES = 10
 
 
 @dataclass
@@ -822,6 +844,22 @@ class VocabularyStore:
             for row in rows:
                 writer.writerow({key: row[key] for key in writer.fieldnames})
 
+    def all_vocab(self, query: str = "") -> list[SavedVocab]:
+        with self.connect() as conn:
+            if query:
+                q = f"%{query}%"
+                rows = conn.execute(
+                    """SELECT * FROM vocab
+                       WHERE word LIKE ? OR note LIKE ? OR saved_definition LIKE ?
+                       ORDER BY updated_at DESC""",
+                    (q, q, q),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM vocab ORDER BY updated_at DESC"
+                ).fetchall()
+        return [self._row_to_vocab(r) for r in rows]
+
     def _row_to_vocab(self, row: sqlite3.Row) -> SavedVocab:
         return SavedVocab(
             id=int(row["id"]),
@@ -1140,6 +1178,174 @@ class SaveVocabDialog(QDialog):
         
 
 
+class VocabBrowserDialog(QDialog):
+    def __init__(self, vocab_store: "VocabularyStore", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.vocab_store = vocab_store
+        self.setWindowTitle("Vocabulary Browser")
+        self.resize(860, 560)
+
+        self._entries: list[SavedVocab] = []
+
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Filter by word, definition, or note…")
+        self.search_box.textChanged.connect(self._refresh)
+
+        self.count_label = QLabel()
+
+        self.word_list = QListWidget()
+        self.word_list.itemSelectionChanged.connect(self._on_selection)
+        self.word_list.itemDoubleClicked.connect(self._edit_selected)
+
+        self.detail_word = QLabel()
+        self.detail_word.setStyleSheet("font-size: 26px; font-weight: 800;")
+        self.detail_word.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.detail_word.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self.detail_book = QLabel()
+        self.detail_book.setWordWrap(True)
+
+        self.detail_def = QTextEdit()
+        self.detail_def.setReadOnly(True)
+        self.detail_def.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.detail_def.setStyleSheet("font-size: 15px;")
+
+        self.detail_note = QLabel()
+        self.detail_note.setWordWrap(True)
+        self.detail_note.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.detail_note.setStyleSheet("color: #555;")
+
+        edit_btn = QPushButton("Edit")
+        edit_btn.clicked.connect(self._edit_selected)
+
+        self.delete_btn = QPushButton("Delete")
+        self.delete_btn.clicked.connect(self._delete_selected)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("Search:"))
+        search_row.addWidget(self.search_box)
+
+        left_layout = QVBoxLayout()
+        left_layout.addLayout(search_row)
+        left_layout.addWidget(self.count_label)
+        left_layout.addWidget(self.word_list)
+        left_widget = QWidget()
+        left_widget.setLayout(left_layout)
+        left_widget.setMaximumWidth(320)
+
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(self.detail_word)
+        right_layout.addWidget(self.detail_book)
+        right_layout.addWidget(QLabel("Definition:"))
+        right_layout.addWidget(self.detail_def)
+        right_layout.addWidget(QLabel("Note:"))
+        right_layout.addWidget(self.detail_note)
+        right_layout.addStretch(1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(edit_btn)
+        btn_row.addWidget(self.delete_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(close_btn)
+        right_layout.addLayout(btn_row)
+
+        right_widget = QWidget()
+        right_widget.setLayout(right_layout)
+
+        splitter = QSplitter()
+        splitter.addWidget(left_widget)
+        splitter.addWidget(right_widget)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(splitter)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        query = self.search_box.text().strip()
+        self._entries = self.vocab_store.all_vocab(query)
+        self.word_list.clear()
+        for v in self._entries:
+            self.word_list.addItem(f"{v.word}  —  {v.book_title or 'Unknown book'}")
+        n = len(self._entries)
+        self.count_label.setText(f"{n} word{'s' if n != 1 else ''}")
+        self._clear_detail()
+
+    def _clear_detail(self) -> None:
+        self.detail_word.clear()
+        self.detail_book.clear()
+        self.detail_def.clear()
+        self.detail_note.clear()
+
+    def _on_selection(self) -> None:
+        v = self._current_vocab()
+        if v is None:
+            self._clear_detail()
+            return
+        self.detail_word.setText(v.word)
+        book_info = v.book_title or "Unknown book"
+        if v.chapter_title:
+            book_info += f"  ·  {v.chapter_title}"
+        self.detail_book.setText(book_info)
+        self.detail_def.setPlainText(saved_definition_to_plain_text(v.saved_definition))
+        self.detail_note.setText(v.note or "")
+
+    def _current_vocab(self) -> Optional[SavedVocab]:
+        items = self.word_list.selectedItems()
+        if not items:
+            return None
+        idx = self.word_list.row(items[0])
+        return self._entries[idx] if 0 <= idx < len(self._entries) else None
+
+    def _edit_selected(self, *_: object) -> None:
+        v = self._current_vocab()
+        if v is None:
+            return
+        record = LookupRecord(
+            clicked_word=v.word,
+            normalized_word=v.normalized_word,
+            term_used=v.dictionary_term,
+            dictionary_definition=v.dictionary_definition,
+            book_id=v.book_id,
+            book_title=v.book_title,
+            chapter=v.chapter_title,
+            chapter_index=v.chapter_index,
+            saved=v,
+            displayed_definition=v.saved_definition,
+            displayed_source="Saved definition",
+        )
+        dlg = SaveVocabDialog(record, self)
+        dlg.deletedRequested.connect(self._on_deleted)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.vocab_store.save_word(record, saved_definition=dlg.saved_definition(), note=dlg.note())
+            self._refresh()
+
+    def _on_deleted(self, record_obj: object) -> None:
+        if isinstance(record_obj, LookupRecord):
+            self.vocab_store.delete_word(record_obj.book_id, record_obj.normalized_word)
+            self._refresh()
+
+    def _delete_selected(self) -> None:
+        v = self._current_vocab()
+        if v is None:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete word?",
+            f"Delete saved word '{v.word}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.vocab_store.delete_word(v.book_id, v.normalized_word)
+            self._refresh()
+
+
 class LookupPopup(QFrame):
     saveRequested = pyqtSignal(object)
     closed = pyqtSignal()
@@ -1253,6 +1459,8 @@ class MainWindow(QMainWindow):
         self.lookup_mode = str(self.settings.value("lookup_mode", "popup"))  # popup | dictionary_app
         self.definition_mode = str(self.settings.value("definition_mode", "dictionary"))  # dictionary | saved
         self.hide_tashkeel = str(self.settings.value("hide_tashkeel", "false")) == "true"
+        self.dark_mode = str(self.settings.value("dark_mode", "false")) == "true"
+        self._recent_files: list[str] = self._load_recent_files()
 
         self.chapter_list = QListWidget()
         self.chapter_list.setMaximumWidth(320)
@@ -1283,6 +1491,7 @@ class MainWindow(QMainWindow):
         self.find_box.returnPressed.connect(self.find_next)
 
         self._build_toolbar()
+        self._build_menu_bar()
         self.setStatusBar(QStatusBar())
 
         last_path = self.settings.value("last_epub_path", "")
@@ -1295,6 +1504,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):  # noqa: N802 - Qt method name
         self.settings.setValue("zoom_factor", self.zoom_factor)
         self.settings.setValue("definition_mode", self.definition_mode)
+        self.settings.setValue("dark_mode", "true" if self.dark_mode else "false")
         if self.book.path:
             self.settings.setValue("last_epub_path", str(self.book.path))
             self.settings.setValue(f"last_chapter::{self.book.path}", self.current_chapter_index)
@@ -1306,10 +1516,10 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        open_action = QAction("Open EPUB", self)
-        open_action.setShortcut(QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self.choose_epub)
-        toolbar.addAction(open_action)
+        self.open_action = QAction("Open EPUB", self)
+        self.open_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.open_action.triggered.connect(self.choose_epub)
+        toolbar.addAction(self.open_action)
 
         toolbar.addSeparator()
 
@@ -1341,7 +1551,8 @@ class MainWindow(QMainWindow):
         
         toolbar.addSeparator()
         self.tashkeel_action = QAction(self._tashkeel_label(), self)
-        self.tashkeel_action.setToolTip("Toggle Arabic tashkeel/harakat display")
+        self.tashkeel_action.setShortcut(QKeySequence("Ctrl+Shift+T"))
+        self.tashkeel_action.setToolTip("Toggle Arabic tashkeel/harakat display (⌘⇧T)")
         self.tashkeel_action.triggered.connect(self.toggle_tashkeel)
         toolbar.addAction(self.tashkeel_action)
 
@@ -1358,8 +1569,9 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
         self.lookup_mode_action = QAction(self._lookup_mode_label(), self)
+        self.lookup_mode_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
         self.lookup_mode_action.setToolTip(
-            "Toggle lookup behavior: in-app popup or macOS Dictionary.app. "
+            "Toggle lookup behavior: in-app popup or macOS Dictionary.app (⌘⇧L). "
             "True macOS Force Click popover is not reliably exposed through PyQt WebEngine, "
             "so Dictionary.app mode uses dict://word."
         )
@@ -1373,10 +1585,30 @@ class MainWindow(QMainWindow):
         self.definition_mode_action.triggered.connect(self.toggle_definition_mode)
         toolbar.addAction(self.definition_mode_action)
 
-        export_action = QAction("Export vocab CSV", self)
-        export_action.setToolTip(f"Exports vocabulary from SQLite to {VOCAB_CSV_PATH}")
-        export_action.triggered.connect(self.export_vocab_csv)
-        toolbar.addAction(export_action)
+        self.dark_mode_action = QAction(self._dark_mode_label(), self)
+        self.dark_mode_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
+        self.dark_mode_action.setToolTip("Toggle reader dark mode (⌘⇧D)")
+        self.dark_mode_action.triggered.connect(self.toggle_dark_mode)
+        toolbar.addAction(self.dark_mode_action)
+
+        vocab_browser_action = QAction("Browse Vocab", self)
+        vocab_browser_action.setShortcut(QKeySequence("Ctrl+Shift+V"))
+        vocab_browser_action.setToolTip("Browse and search saved vocabulary (⌘⇧V)")
+        vocab_browser_action.triggered.connect(self.open_vocab_browser)
+        toolbar.addAction(vocab_browser_action)
+
+        self.export_action = QAction("Export vocab CSV", self)
+        self.export_action.setToolTip(f"Exports vocabulary from SQLite to {VOCAB_CSV_PATH}")
+        self.export_action.triggered.connect(self.export_vocab_csv)
+        toolbar.addAction(self.export_action)
+
+    def _build_menu_bar(self) -> None:
+        file_menu = self.menuBar().addMenu("File")
+        file_menu.addAction(self.open_action)
+        self._recent_menu: QMenu = file_menu.addMenu("Open Recent")
+        self._update_recent_files_menu()
+        file_menu.addSeparator()
+        file_menu.addAction(self.export_action)
 
     def choose_epub(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1410,6 +1642,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"Arabic EPUB Dictionary Reader — {self.book.title or Path(path).name}")
         self.settings.setValue("last_epub_path", path)
+        self._add_to_recent_files(path)
 
         chapter_index = 0
         if restore_position:
@@ -1452,6 +1685,7 @@ class MainWindow(QMainWindow):
     def after_word_handler_installed(self) -> None:
         self.apply_saved_word_highlights()
         self.apply_tashkeel_visibility()
+        self.apply_dark_mode()
 
     def apply_saved_word_highlights(self) -> None:
         if not self.book.book_id:
@@ -1632,6 +1866,61 @@ class MainWindow(QMainWindow):
         });
         """
         self.reader_view.page().runJavaScript(js)
+
+    def _dark_mode_label(self) -> str:
+        return "Light Mode" if getattr(self, "dark_mode", False) else "Dark Mode"
+
+    def toggle_dark_mode(self) -> None:
+        self.dark_mode = not self.dark_mode
+        self.settings.setValue("dark_mode", "true" if self.dark_mode else "false")
+        self.dark_mode_action.setText(self._dark_mode_label())
+        self.apply_dark_mode()
+        self.statusBar().showMessage("Dark mode on" if self.dark_mode else "Dark mode off")
+
+    def apply_dark_mode(self) -> None:
+        js = APPLY_DARK_MODE_JS.replace("__DARK__", "true" if self.dark_mode else "false")
+        self.reader_view.page().runJavaScript(js)
+
+    def open_vocab_browser(self) -> None:
+        dlg = VocabBrowserDialog(self.vocab_store, self)
+        dlg.exec()
+        self.apply_saved_word_highlights()
+
+    def _load_recent_files(self) -> list[str]:
+        raw = self.settings.value("recent_files", "[]")
+        try:
+            return json.loads(str(raw))[:MAX_RECENT_FILES]
+        except Exception:
+            return []
+
+    def _add_to_recent_files(self, path: str) -> None:
+        files = [f for f in self._recent_files if f != path]
+        files.insert(0, path)
+        self._recent_files = files[:MAX_RECENT_FILES]
+        self.settings.setValue("recent_files", json.dumps(self._recent_files))
+        self._update_recent_files_menu()
+
+    def _update_recent_files_menu(self) -> None:
+        if not hasattr(self, "_recent_menu"):
+            return
+        self._recent_menu.clear()
+        if not self._recent_files:
+            no_recent = self._recent_menu.addAction("No recent files")
+            no_recent.setEnabled(False)
+            return
+        for path in self._recent_files:
+            action = self._recent_menu.addAction(Path(path).name)
+            action.setToolTip(path)
+            action.triggered.connect(lambda checked, p=path: self._open_recent_epub(p))
+
+    def _open_recent_epub(self, path: str) -> None:
+        if not Path(path).exists():
+            QMessageBox.warning(self, "File not found", f"Could not find:\n{path}")
+            self._recent_files = [f for f in self._recent_files if f != path]
+            self.settings.setValue("recent_files", json.dumps(self._recent_files))
+            self._update_recent_files_menu()
+            return
+        self.open_epub(path, restore_position=True)
 
     def _sync_chapter_from_path(self, local_path: str) -> None:
         path = Path(local_path)
