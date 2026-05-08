@@ -53,6 +53,22 @@ except ImportError as exc:
         "Missing EPUB dependencies. Install with:\n"
         "pip install ebooklib beautifulsoup4 lxml"
     ) from exc
+else:
+    # ebooklib eagerly reads every manifest item in read_epub() with no error
+    # handling — a long-standing unfixed bug (issues #161, #197, #222, #281).
+    # EPUBs that list fonts or images in the manifest but omit them from the
+    # ZIP raise KeyError and abort the entire load.  Patching read_file() once
+    # here makes those missing entries return empty bytes instead of crashing.
+    _orig_epub_read_file = epub.EpubReader.read_file
+
+    def _safe_epub_read_file(self, name: str) -> bytes:
+        try:
+            return _orig_epub_read_file(self, name)
+        except KeyError:
+            print(f"Warning: missing EPUB resource skipped during load: {name}")
+            return b""
+
+    epub.EpubReader.read_file = _safe_epub_read_file
 
 try:
     from bs4 import BeautifulSoup
