@@ -113,12 +113,12 @@ except ImportError as exc:
     ) from exc
 
 
-APP_ORG = "LocalTools"
-APP_NAME = "ArabicEpubDictionaryReader"
+APP_ORG = "Kalima"
+APP_NAME = "Kalima"
 
 APP_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / APP_NAME
 VOCAB_DB_PATH = APP_SUPPORT_DIR / "vocabulary.sqlite3"
-VOCAB_CSV_PATH = Path.home() / "Documents" / "arabic_epub_vocab.csv"
+VOCAB_CSV_PATH = Path.home() / "Documents" / "kalima_vocab.csv"
 
 ARABIC_DIACRITICS_RE = re.compile(
     r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]"
@@ -915,7 +915,7 @@ class EpubBook:
         self.close()
         self.path = Path(epub_path)
         self.book_id = calculate_file_hash(self.path)
-        self.tempdir = tempfile.TemporaryDirectory(prefix="arabic_epub_reader_")
+        self.tempdir = tempfile.TemporaryDirectory(prefix="kalima_epub_")
         out_dir = Path(self.tempdir.name)
 
         book = epub.read_epub(str(self.path))
@@ -1464,7 +1464,7 @@ class LookupPopup(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Arabic EPUB Dictionary Reader")
+        self.setWindowTitle("Kalima")
         self.resize(1200, 820)
 
         self.settings = QSettings(APP_ORG, APP_NAME)
@@ -1656,7 +1656,7 @@ class MainWindow(QMainWindow):
             self.chapter_list.addItem(chapter.title)
         self.chapter_list.blockSignals(False)
 
-        self.setWindowTitle(f"Arabic EPUB Dictionary Reader — {self.book.title or Path(path).name}")
+        self.setWindowTitle(f"Kalima — {self.book.title or Path(path).name}")
         self.settings.setValue("last_epub_path", path)
         self._add_to_recent_files(path)
 

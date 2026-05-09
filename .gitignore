@@ -7,3 +7,7 @@ env/
 bin/
 include/
 lib/
+.claude/
+__pycache__/
+build/
+dist/
