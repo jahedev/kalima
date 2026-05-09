@@ -100,6 +100,7 @@ try:
         QMenu,
         QMessageBox,
         QPushButton,
+        QComboBox,
         QSizePolicy,
         QSplitter,
         QStatusBar,
@@ -386,6 +387,44 @@ APPLY_DARK_MODE_JS = r"""
 """
 
 MAX_RECENT_FILES = 10
+
+_FONT_WEIGHT_RE = re.compile(
+    r"-(Regular|Bold|Italic|Light|Medium|SemiBold|ExtraBold|Black|Thin|Variable).*$",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class FontOption:
+    display_name: str       # shown in the picker, e.g. "Amiri"
+    css_family: str         # value used in CSS font-family
+    file_path: Optional[Path]  # .ttf path, or None for system default
+
+
+def camel_to_spaces(s: str) -> str:
+    """Convert CamelCase to space-separated words, keeping acronyms together."""
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)
+    s = re.sub(r"([a-z\d])([A-Z])", r"\1 \2", s)
+    return s.strip()
+
+
+def load_font_options() -> list[FontOption]:
+    """Return all available reader fonts: system default first, then bundled .ttf files."""
+    options: list[FontOption] = [
+        FontOption(
+            display_name="System Default",
+            css_family="-apple-system, BlinkMacSystemFont, 'Geeza Pro', Arial, serif",
+            file_path=None,
+        )
+    ]
+    fonts_dir = _BASE_DIR / "assets" / "fonts"
+    if fonts_dir.exists():
+        for ttf in sorted(fonts_dir.glob("*.ttf")):
+            stem = _FONT_WEIGHT_RE.sub("", ttf.stem)
+            display = camel_to_spaces(stem)
+            options.append(FontOption(display_name=display, css_family=display, file_path=ttf))
+    return options
+
 
 
 @dataclass
@@ -1516,6 +1555,8 @@ class MainWindow(QMainWindow):
         self.hide_tashkeel = str(self.settings.value("hide_tashkeel", "false")) == "true"
         self.dark_mode = str(self.settings.value("dark_mode", "false")) == "true"
         self.toolbar_style = str(self.settings.value("toolbar_style", "icon"))
+        self._font_options: list[FontOption] = load_font_options()
+        self.reader_font = str(self.settings.value("reader_font", "System Default"))
         self._recent_files: list[str] = self._load_recent_files()
 
         self.chapter_list = QListWidget()
@@ -1563,6 +1604,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("definition_mode", self.definition_mode)
         self.settings.setValue("dark_mode", "true" if self.dark_mode else "false")
         self.settings.setValue("toolbar_style", self.toolbar_style)
+        self.settings.setValue("reader_font", self.reader_font)
         if self.book.path:
             self.settings.setValue("last_epub_path", str(self.book.path))
             self.settings.setValue(f"last_chapter::{self.book.path}", self.current_chapter_index)
@@ -1615,6 +1657,20 @@ class MainWindow(QMainWindow):
         reset_zoom_action = _ia("reset", "Reset Zoom")
         reset_zoom_action.triggered.connect(self.reset_zoom)
         toolbar.addAction(reset_zoom_action)
+
+        toolbar.addSeparator()
+
+        self.font_combo = QComboBox()
+        self.font_combo.setMaximumWidth(170)
+        self.font_combo.setToolTip("Reader font")
+        for opt in self._font_options:
+            self.font_combo.addItem(opt.display_name)
+        current_idx = next(
+            (i for i, o in enumerate(self._font_options) if o.display_name == self.reader_font), 0
+        )
+        self.font_combo.setCurrentIndex(current_idx)
+        self.font_combo.currentIndexChanged.connect(self._on_font_changed)
+        toolbar.addWidget(self.font_combo)
 
         toolbar.addSeparator()
 
@@ -1778,6 +1834,7 @@ class MainWindow(QMainWindow):
         self.apply_saved_word_highlights()
         self.apply_tashkeel_visibility()
         self.apply_dark_mode()
+        self.apply_reader_font()
 
     def apply_saved_word_highlights(self) -> None:
         if not self.book.book_id:
@@ -1969,6 +2026,68 @@ class MainWindow(QMainWindow):
             self._search_icon_label.setPixmap(
                 svg_icon("search", size=18).pixmap(QSize(18, 18))
             )
+
+    def _current_font_option(self) -> FontOption:
+        for opt in self._font_options:
+            if opt.display_name == self.reader_font:
+                return opt
+        return self._font_options[0]
+
+    def _on_font_changed(self, index: int) -> None:
+        if 0 <= index < len(self._font_options):
+            self.reader_font = self._font_options[index].display_name
+            self.settings.setValue("reader_font", self.reader_font)
+            self.apply_reader_font()
+
+    def apply_reader_font(self) -> None:
+        """Inject @font-face + font-family override into the current chapter."""
+        import json as _json
+        opt = self._current_font_option()
+
+        if opt.file_path is not None:
+            font_uri = opt.file_path.as_uri()
+            face_css = (
+                f'@font-face {{'
+
+                f'  font-family: "{opt.css_family}";'
+
+                f'  src: url("{font_uri}");'
+
+                f'  font-weight: normal; font-style: normal;'
+
+                f'}}'
+
+            )
+            family_css = f'"{opt.css_family}", serif'
+        else:
+            face_css = ""
+            family_css = opt.css_family
+
+        face_js   = _json.dumps(face_css)
+        override  = _json.dumps(
+            f"html, body, p, div, li, blockquote {{"
+            f" font-family: {family_css} !important; }}"
+        )
+        js = f"""
+        (function() {{
+            let el;
+            el = document.getElementById('kalima-font-face');
+            if (el) el.remove();
+            el = document.getElementById('kalima-font-override');
+            if (el) el.remove();
+            if ({face_js}) {{
+                el = document.createElement('style');
+                el.id = 'kalima-font-face';
+                el.textContent = {face_js};
+                document.head.appendChild(el);
+            }}
+            el = document.createElement('style');
+            el.id = 'kalima-font-override';
+            el.textContent = {override};
+            document.head.appendChild(el);
+        }})();
+        """
+        self.reader_view.page().runJavaScript(js)
 
     def set_toolbar_style(self, style: str, save: bool = True) -> None:
         self.toolbar_style = style
