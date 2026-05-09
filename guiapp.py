@@ -779,6 +779,7 @@ class VocabularyStore:
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     def _init_db(self) -> None:
@@ -1759,13 +1760,15 @@ class MainWindow(QMainWindow):
             toolbar_menu.addAction(a)
 
     def choose_epub(self) -> None:
+        last_dir = str(self.settings.value("last_open_dir", str(Path.home())))
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open EPUB",
-            str(Path.home()),
+            last_dir,
             "EPUB files (*.epub);;All files (*)",
         )
         if path:
+            self.settings.setValue("last_open_dir", str(Path(path).parent))
             self.open_epub(path, restore_position=False)
 
     def open_epub(self, path: str, restore_position: bool = False) -> None:
