@@ -11,6 +11,7 @@ a = Analysis(
     datas=[
         *collect_data_files('ebooklib'),
         *collect_data_files('bs4'),
+        ('assets', 'assets'),   # toolbar SVG icons and app icon
     ],
     hiddenimports=[
         # PyQt6 WebEngine internals
@@ -56,7 +57,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.icns',
+    icon='assets/app-icon/icon.icns',
 )
 
 coll = COLLECT(
@@ -73,7 +74,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='Kalima.app',
-    icon='icon.icns',
+    icon='assets/app-icon/icon.icns',
     bundle_identifier='com.localtools.kalima',
     info_plist={
         'CFBundleName': 'Kalima',

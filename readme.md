@@ -28,17 +28,22 @@ The app uses macOS Dictionary Services, so dictionary results depend on the dict
 
 ## Installation
 
-Create a virtual environment:
+### (Method 1) Easy - Paste this into Terminal App
+```bash
+/bin/zsh -c "$(curl -fsSL https://raw.githubusercontent.com/jahedev/kalima/refs/heads/main/install.sh)"
+```
+
+
+
+### (Method 2) Create a virtual environment:
 
 ```bash
 python3 -m venv epubdict-env
 source epubdict-env/bin/activate
-```
 
-Install dependencies:
+pip install -r requirements.txt
 
-```bash
-pip install PyQt6 PyQt6-WebEngine ebooklib beautifulsoup4 lxml pyobjc-framework-DictionaryServices
+python guiapp.py
 ```
 
 ## Running
