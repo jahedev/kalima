@@ -84,7 +84,7 @@ try:
     from PyQt6.QtCore import Qt, QByteArray, QSize, QUrl, QSettings, QTimer, pyqtSignal
     from PyQt6.QtGui import (
         QAction, QActionGroup, QCursor, QGuiApplication, QIcon,
-        QKeySequence, QPainter, QPixmap,
+        QKeySequence, QPainter, QPalette, QPixmap,
     )
     from PyQt6.QtSvg import QSvgRenderer
     from PyQt6.QtWidgets import (
@@ -133,8 +133,20 @@ else:
 ICONS_DIR = _BASE_DIR / "assets" / "icons"
 
 
-def svg_icon(name: str, color: str = "#3a3a3c", size: int = 20) -> "QIcon":
-    """Load an SVG from assets/icons/, substitute currentColor, return a QIcon."""
+def svg_icon(name: str, color: str | None = None, size: int = 20) -> "QIcon":
+    """Load an SVG from assets/icons/, substitute currentColor, return a QIcon.
+
+    When *color* is None (default) the color is chosen automatically:
+    light gray on a dark toolbar, dark gray on a light toolbar, so icons
+    stay legible regardless of the macOS appearance setting.
+    """
+    if color is None:
+        app = QApplication.instance()
+        if app is not None:
+            bg = app.palette().color(QPalette.ColorRole.Window)
+            color = "#ececec" if bg.lightness() < 128 else "#3a3a3c"
+        else:
+            color = "#3a3a3c"
     path = ICONS_DIR / f"{name}.svg"
     if not path.exists():
         return QIcon()
@@ -1537,6 +1549,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_menu_bar()
         self.setStatusBar(QStatusBar())
+        QApplication.instance().paletteChanged.connect(self._refresh_toolbar_icons)
 
         last_path = self.settings.value("last_epub_path", "")
         if last_path and Path(str(last_path)).exists():
@@ -1563,42 +1576,49 @@ class MainWindow(QMainWindow):
         toolbar.setIconSize(QSize(20, 20))
         self.addToolBar(toolbar)
 
-        self.open_action = QAction(svg_icon("open-epub"), "Open EPUB", self)
+        # Helper: create an action with an icon and register the icon name so
+        # _refresh_toolbar_icons() can re-render it when the OS appearance changes.
+        def _ia(icon_name: str, text: str) -> QAction:
+            a = QAction(svg_icon(icon_name), text, self)
+            a.setObjectName(icon_name)
+            return a
+
+        self.open_action = _ia("open-epub", "Open EPUB")
         self.open_action.setShortcut(QKeySequence.StandardKey.Open)
         self.open_action.triggered.connect(self.choose_epub)
         toolbar.addAction(self.open_action)
 
         toolbar.addSeparator()
 
-        prev_action = QAction(svg_icon("previous"), "Previous", self)
+        prev_action = _ia("previous", "Previous")
         prev_action.setShortcut(QKeySequence.StandardKey.MoveToPreviousChar)
         prev_action.triggered.connect(self.previous_chapter)
         toolbar.addAction(prev_action)
 
-        next_action = QAction(svg_icon("next"), "Next", self)
+        next_action = _ia("next", "Next")
         next_action.setShortcut(QKeySequence.StandardKey.MoveToNextChar)
         next_action.triggered.connect(self.next_chapter)
         toolbar.addAction(next_action)
 
         toolbar.addSeparator()
 
-        zoom_out_action = QAction(svg_icon("font-decrease"), "Zoom Out", self)
+        zoom_out_action = _ia("font-decrease", "Zoom Out")
         zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
         zoom_out_action.triggered.connect(self.zoom_out)
         toolbar.addAction(zoom_out_action)
 
-        zoom_in_action = QAction(svg_icon("font-increase"), "Zoom In", self)
+        zoom_in_action = _ia("font-increase", "Zoom In")
         zoom_in_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
         zoom_in_action.triggered.connect(self.zoom_in)
         toolbar.addAction(zoom_in_action)
 
-        reset_zoom_action = QAction(svg_icon("reset"), "Reset Zoom", self)
+        reset_zoom_action = _ia("reset", "Reset Zoom")
         reset_zoom_action.triggered.connect(self.reset_zoom)
         toolbar.addAction(reset_zoom_action)
-        
+
         toolbar.addSeparator()
 
-        self.tashkeel_action = QAction(svg_icon("hide-tashkeel"), self._tashkeel_label(), self)
+        self.tashkeel_action = _ia("hide-tashkeel", self._tashkeel_label())
         self.tashkeel_action.setShortcut(QKeySequence("Ctrl+Shift+T"))
         self.tashkeel_action.setToolTip("Toggle Arabic tashkeel/harakat display (⌘⇧T)")
         self.tashkeel_action.triggered.connect(self.toggle_tashkeel)
@@ -1606,22 +1626,22 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        search_label = QLabel()
-        search_label.setPixmap(svg_icon("search", size=18).pixmap(QSize(18, 18)))
-        search_label.setContentsMargins(4, 0, 2, 0)
-        toolbar.addWidget(search_label)
+        self._search_icon_label = QLabel()
+        self._search_icon_label.setPixmap(svg_icon("search", size=18).pixmap(QSize(18, 18)))
+        self._search_icon_label.setContentsMargins(4, 0, 2, 0)
+        toolbar.addWidget(self._search_icon_label)
         self.find_box.setMaximumWidth(260)
         self.find_box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         toolbar.addWidget(self.find_box)
 
-        find_next_action = QAction(svg_icon("find-next"), "Find Next", self)
+        find_next_action = _ia("find-next", "Find Next")
         find_next_action.setShortcut(QKeySequence.StandardKey.FindNext)
         find_next_action.triggered.connect(self.find_next)
         toolbar.addAction(find_next_action)
 
         toolbar.addSeparator()
 
-        self.lookup_mode_action = QAction(svg_icon("lookup-popup"), self._lookup_mode_label(), self)
+        self.lookup_mode_action = _ia("lookup-popup", self._lookup_mode_label())
         self.lookup_mode_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
         self.lookup_mode_action.setToolTip(
             "Toggle lookup behavior: in-app popup or macOS Dictionary.app (⌘⇧L). "
@@ -1631,26 +1651,26 @@ class MainWindow(QMainWindow):
         self.lookup_mode_action.triggered.connect(self.toggle_lookup_mode)
         toolbar.addAction(self.lookup_mode_action)
 
-        self.definition_mode_action = QAction(svg_icon("definition-saved"), self._definition_mode_label(), self)
+        self.definition_mode_action = _ia("definition-saved", self._definition_mode_label())
         self.definition_mode_action.setToolTip(
             "When a word is already saved, choose whether clicking it shows your saved definition or a fresh dictionary lookup."
         )
         self.definition_mode_action.triggered.connect(self.toggle_definition_mode)
         toolbar.addAction(self.definition_mode_action)
 
-        self.dark_mode_action = QAction(svg_icon("dark-mode"), self._dark_mode_label(), self)
+        self.dark_mode_action = _ia("dark-mode", self._dark_mode_label())
         self.dark_mode_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
         self.dark_mode_action.setToolTip("Toggle reader dark mode (⌘⇧D)")
         self.dark_mode_action.triggered.connect(self.toggle_dark_mode)
         toolbar.addAction(self.dark_mode_action)
 
-        vocab_browser_action = QAction(svg_icon("browse-vocab"), "Browse Vocab", self)
+        vocab_browser_action = _ia("browse-vocab", "Browse Vocab")
         vocab_browser_action.setShortcut(QKeySequence("Ctrl+Shift+V"))
         vocab_browser_action.setToolTip("Browse and search saved vocabulary (⌘⇧V)")
         vocab_browser_action.triggered.connect(self.open_vocab_browser)
         toolbar.addAction(vocab_browser_action)
 
-        self.export_action = QAction(svg_icon("export-vocab-csv"), "Export Vocab CSV", self)
+        self.export_action = _ia("export-vocab-csv", "Export Vocab CSV")
         self.export_action.setToolTip(f"Exports vocabulary from SQLite to {VOCAB_CSV_PATH}")
         self.export_action.triggered.connect(self.export_vocab_csv)
         toolbar.addAction(self.export_action)
@@ -1938,6 +1958,17 @@ class MainWindow(QMainWindow):
         });
         """
         self.reader_view.page().runJavaScript(js)
+
+    def _refresh_toolbar_icons(self) -> None:
+        """Re-render all toolbar SVG icons for the current light/dark appearance."""
+        for action in self._toolbar.actions():
+            name = action.objectName()
+            if name:
+                action.setIcon(svg_icon(name))
+        if hasattr(self, "_search_icon_label"):
+            self._search_icon_label.setPixmap(
+                svg_icon("search", size=18).pixmap(QSize(18, 18))
+            )
 
     def set_toolbar_style(self, style: str, save: bool = True) -> None:
         self.toolbar_style = style
