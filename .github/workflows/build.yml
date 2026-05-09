@@ -1,0 +1,73 @@
+name: Build Kalima
+
+on:
+  push:
+    tags:
+      - "v*"          # triggers on v0.1.0-beta, v1.0.0, etc.
+  workflow_dispatch:  # allows manual trigger from GitHub UI
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14      # Apple Silicon (arm64)
+            arch: arm64
+          - runner: macos-13      # Intel (x86_64)
+            arch: x86_64
+
+    runs-on: ${{ matrix.runner }}
+    name: Build (${{ matrix.arch }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install PyQt6 PyQt6-WebEngine ebooklib beautifulsoup4 lxml \
+                      pyobjc-framework-DictionaryServices pyinstaller
+
+      - name: Build app
+        run: pyinstaller kalima.spec --noconfirm
+
+      - name: Create DMG
+        run: |
+          STAGING=$(mktemp -d)
+          cp -R dist/Kalima.app "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+          hdiutil create -volname "Kalima" -srcfolder "$STAGING" -ov -format UDRW /tmp/kalima_rw.dmg
+          hdiutil convert /tmp/kalima_rw.dmg -format UDZO -imagekey zlib-level=9 \
+            -o "dist/Kalima-${{ github.ref_name }}-${{ matrix.arch }}.dmg"
+          rm -rf "$STAGING" /tmp/kalima_rw.dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kalima-${{ matrix.arch }}
+          path: dist/Kalima-*.dmg
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
