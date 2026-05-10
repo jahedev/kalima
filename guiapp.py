@@ -216,6 +216,11 @@ img, svg, video {
 }
 ::selection {
     background: #ffe8a3;
+    color: #1a1a1a;
+}
+html.reader-dark ::selection {
+    background: #4a6fa5;
+    color: #ffffff;
 }
 html.reader-dark, html.reader-dark body {
     background: #1c1c1e !important;
