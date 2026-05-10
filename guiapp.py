@@ -2474,8 +2474,8 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         self.tashkeel_action = _ia("hide-tashkeel", self._tashkeel_label())
-        self.tashkeel_action.setShortcut(QKeySequence("Ctrl+Shift+T"))
-        self.tashkeel_action.setToolTip("Toggle Arabic tashkeel/harakat display (⌘⇧T)")
+        self.tashkeel_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
+        self.tashkeel_action.setToolTip("Toggle Arabic tashkeel/harakat display (⌘⇧H)")
         self.tashkeel_action.triggered.connect(self.toggle_tashkeel)
         toolbar.addAction(self.tashkeel_action)
 
