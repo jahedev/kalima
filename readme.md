@@ -1,118 +1,198 @@
-# Arabic EPUB Dictionary Reader
+<div align="center">
 
-A macOS Arabic EPUB reader with clickable word lookup using Apple Dictionary.app. Save vocabulary with editable definitions and notes, highlight saved words in blue, toggle saved vs dictionary definitions, and export saved words to Anki HTML import files.
+# كلمة · Kalima
+
+**An Arabic EPUB reader for macOS built for learners**
+
+Dictionary lookup · AI analysis · Vocabulary management · Anki export
+
+[![macOS](https://img.shields.io/badge/macOS-12%2B-black?logo=apple)](https://www.apple.com/macos/)
+[![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![PyQt6](https://img.shields.io/badge/PyQt6-WebEngine-green)](https://www.riverbankcomputing.com/software/pyqt/)
+
+</div>
+
+---
+
+## What is Kalima?
+
+Kalima (كلمة, "word") is a native macOS application for reading Arabic EPUB books. It's designed for Arabic learners who want to look up words, save vocabulary, and use AI tools — all without leaving the reader.
+
+> **Note:** Kalima is macOS-only. Dictionary lookup uses the native macOS Dictionary Services API.
+
+---
 
 ## Features
 
-* Open and read Arabic EPUB files
-* Search inside the current chapter
-* Click any word to show a dictionary popup
-* Optional lookup mode that opens macOS Dictionary.app
-* Save vocabulary to a local SQLite database
-* Edit the definition before saving
-* Add optional notes to saved words
-* Saved words are highlighted blue in the EPUB
-* Reopening the same EPUB restores saved-word highlights
-* Export vocabulary to CSV
+### 📖 Reader
+- Opens any standard `.epub` file
+- Chapter sidebar with full table of contents
+- Previous / Next chapter navigation
+- Zoom in and out
+- **Dark mode** toggle
+- **18 bundled Arabic fonts** — switchable from the toolbar (Amiri, Scheherazade, Noto Naskh, Cairo, and more)
+- Toggle Arabic **tashkeel** (diacritical marks) on or off
+- Find in chapter (`⌘G`)
+- Remembers the last-read chapter and scroll position per book
+- Recent files menu
 
-## macOS Dictionary Setup
+### 🔍 Dictionary Lookup
+- **Single-click** any word to open an in-app popup with the macOS Arabic dictionary definition
+- **Double-click** to look up the selected text
+- Toggle between **in-app popup** and **macOS Dictionary.app** modes
+- Toggle between the **live dictionary** result and your **saved definition**
+- Saved words are **highlighted in blue** throughout the chapter
 
-Before running the app, enable the Arabic dictionary in macOS:
+### 🤖 AI Tools
+Right-click any selected text for instant AI actions:
 
-1. Open **Dictionary.app**
-2. Go to **Dictionary > Settings** or **Preferences**
-3. Enable **Arabic – English** / Oxford Arabic Dictionary if available
-4. Move it higher in the list if you want it preferred
+| Action | What it does |
+|---|---|
+| **Translate** | Arabic → English translation |
+| **Explain** | Meaning, tone, and context in English |
+| **Explain Simply in Arabic** | Plain-language Arabic explanation |
+| **Vocabulary** | Key words with roots and definitions |
+| **Grammar** | Verb forms, noun cases, sentence structure |
+| **Morphology** | Root (جذر), pattern (وزن), word category |
+| **Add Tashkīl** | Returns the text with full diacritical marks |
+| **Simplify Arabic** | Rewrites in accessible Modern Standard Arabic |
+| **Make Anki Cards** | Generates ready-to-import flashcards |
+| **Ask Custom Prompt…** | Your own prompt, with `{text}` as a placeholder |
 
-The app uses macOS Dictionary Services, so dictionary results depend on the dictionaries enabled in Dictionary.app.
+AI responses stream in a **resizable sidebar panel** powered by [Ollama](https://ollama.com) (runs locally — no API key or internet required after setup).
+
+**Right-click also gives you:**
+- **Translate on Google** — opens Google Translate in the browser or in an in-app panel
+- **Ask Claude** — opens [claude.ai](https://claude.ai) with a pre-filled translation + vocabulary prompt
+- **Ask ChatGPT** — same, on [chatgpt.com](https://chatgpt.com)
+- **Copy** — reliable clipboard copy even where the browser blocks it
+
+All AI prompts live in [`assets/prompts.json`](assets/prompts.json) — edit or add prompts without touching any code.
+
+### 📚 Vocabulary
+- Save any word with an **editable definition** and optional **note**
+- Full **Vocabulary Browser** — search, edit, and delete entries
+- Vocabulary is stored locally in SQLite (`~/Library/Application Support/Kalima/`)
+- **Export to CSV** for spreadsheet use
+- **Export to Anki (.apkg)** — one click creates a deck you can double-click to import into Anki
+  - Cards are keyed by word so **re-exporting updates existing notes** rather than creating duplicates
+  - Each book becomes a `Kalima :: Book Title` subdeck automatically
+
+---
 
 ## Installation
 
-### (Method 1) Easy - Paste this into Terminal App
+### Option A — One command (recommended for most users)
+
+Paste this into Terminal. It installs Homebrew, Python 3.12, and all dependencies automatically:
+
 ```bash
 /bin/zsh -c "$(curl -fsSL https://raw.githubusercontent.com/jahedev/kalima/refs/heads/main/install.sh)"
 ```
 
-
-
-### (Method 2) Create a virtual environment:
+### Option B — Manual setup
 
 ```bash
-python3 -m venv epubdict-env
-source epubdict-env/bin/activate
-
+git clone https://github.com/jahedev/kalima.git
+cd kalima
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-
 python guiapp.py
 ```
 
-## Running
+### Option C — Pre-built app (macOS only)
+
+Download the latest `.dmg` from [Releases](https://github.com/jahedev/kalima/releases), open it, and drag **Kalima.app** to your Applications folder. Available for both Apple Silicon and Intel.
+
+---
+
+## AI Setup (optional)
+
+The AI sidebar requires [Ollama](https://ollama.com) running locally.
 
 ```bash
-python guiapp.py
+# Install via Homebrew
+brew install ollama
 
-# command-line lookup
-python lookup.py شرح
+# Start the server
+ollama serve
 ```
 
-## Usage
+Then pull a model. Recommended in order of quality:
 
-1. Click **Open EPUB**
-2. Choose an Arabic `.epub` file
-3. Click any word in the text
-4. A popup will show the dictionary result
-5. Click **Save word** to edit and save the definition
-6. Saved words are highlighted in blue
-
-## Lookup Modes
-
-The toolbar includes a lookup mode toggle:
-
-* **Lookup: Popup** — shows the in-app popup
-* **Lookup: Dictionary.app** — opens the word in macOS Dictionary.app using `dict://word`
-
-Native macOS Force Click lookup is not reliably exposed through PyQt WebEngine, so Dictionary.app mode is the closest stable option.
-
-## Definition Modes
-
-The toolbar includes a definition toggle:
-
-* **Definition: Dictionary** — always shows the live dictionary result
-* **Definition: Saved** — for saved words, shows your edited saved definition
-
-## Vocabulary Storage
-
-Saved vocabulary is stored locally in SQLite:
+| Model | RAM needed | Notes |
+|---|---|---|
+| `aya-expanse:32b` | ~20 GB | Best Arabic quality; requires 36 GB+ unified memory |
+| `gemma3:27b` | ~18 GB | Excellent; M1/M2 Pro or Max with 16 GB+ |
+| `jwnder/jais-adaptive:7b` | ~5 GB | Good Arabic support; works on any Mac with 8 GB+ |
+| `gemma4:e4b` | ~3 GB | Lightweight; fastest but less accurate on complex text |
 
 ```bash
-~/Library/Application Support/ArabicEpubDictionaryReader/vocabulary.sqlite3
+ollama pull gemma3:27b
 ```
 
-Each saved entry stores:
+> Smaller models are faster but less accurate on classical prose, poetry, and morphological analysis. The app's **Models…** button can pull any of these for you.
 
-* word
-* normalized word
-* dictionary term
-* saved definition
-* original dictionary definition
-* optional note
-* book title
-* chapter title
-* chapter index
-* saved/updated timestamps
+---
 
-## Export Vocabulary CSV
+## macOS Dictionary Setup
 
-Click **Export vocab CSV** to export saved vocabulary to:
+For the best dictionary results, enable the Arabic dictionary in macOS:
+
+1. Open **Dictionary.app**
+2. Go to **Dictionary → Settings**
+3. Enable **Arabic – English** (Oxford Arabic Dictionary)
+4. Move it higher in the list for priority
+
+---
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `⌘ O` | Open EPUB |
+| `← →` | Previous / Next chapter |
+| `⌘ +` / `⌘ -` | Zoom in / out |
+| `⌘ G` | Find next in chapter |
+| `⌘ ⇧ V` | Vocabulary Browser |
+| `⌘ ⇧ A` | Show / hide AI panel |
+| `⌘ ⇧ T` | Toggle Google Translate panel |
+| `⌘ ⇧ H` | Toggle tashkeel |
+| `⌘ ⇧ D` | Toggle dark mode |
+| `⌘ ⇧ L` | Toggle lookup mode |
+
+---
+
+## Building the App
+
+A GitHub Actions workflow builds and packages signed `.dmg` files for both Apple Silicon and Intel on every version tag:
 
 ```bash
-~/Documents/arabic_epub_vocab.csv
+git tag v1.0.0
+git push --tags
 ```
 
-## Export to Anki
+To build locally:
 
-Anki Support (in the future)
+```bash
+pip install pyinstaller
+pyinstaller kalima.spec --noconfirm
+# Output: dist/Kalima.app
+```
 
-## Notes
+---
 
-Apple’s Dictionary Services API returns plain-text dictionary output, not the full rich Dictionary.app layout. The app reformats the result for readability, but it may not exactly match Dictionary.app.
+## Requirements
+
+- macOS 12 Monterey or later
+- Python 3.12
+- Dependencies: `PyQt6`, `PyQt6-WebEngine`, `ebooklib`, `beautifulsoup4`, `lxml`, `genanki`
+- Optional: `pyobjc-framework-DictionaryServices` (for dictionary lookup)
+- Optional: [Ollama](https://ollama.com) (for AI features)
+
+---
+
+## License
+
+MIT
