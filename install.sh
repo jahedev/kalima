@@ -102,4 +102,4 @@ echo ""
 echo -e "${B}  ✦ Launching Kalima…${N}"
 echo ""
 
-exec "$VENV/bin/python" "$INSTALL_DIR/guiapp.py"
+exec "$VENV/bin/python" "$INSTALL_DIR/kalima.py"

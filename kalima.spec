@@ -5,7 +5,7 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 a = Analysis(
-    ['guiapp.py'],
+    ['kalima.py'],
     pathex=[],
     binaries=[],
     datas=[
