@@ -1211,6 +1211,7 @@ class ReaderView(QWebEngineView):
     wordClicked = pyqtSignal(str)
     aiActionRequested = pyqtSignal(str, str)   # action_id, selected_text
     customAiRequested = pyqtSignal(str, str)   # custom_prompt_template, selected_text
+    translateRequested = pyqtSignal(str)        # selected_text
 
     def mouseReleaseEvent(self, event):  # noqa: N802 - Qt method name
         super().mouseReleaseEvent(event)
@@ -1255,7 +1256,7 @@ class ReaderView(QWebEngineView):
         copy_action = menu.addAction("Copy")
         copy_action.triggered.connect(lambda: QApplication.clipboard().setText(selected))
         translate_action = menu.addAction("Translate on Google")
-        translate_action.triggered.connect(lambda: self._open_google_translate(selected))
+        translate_action.triggered.connect(lambda: self.translateRequested.emit(selected))
         menu.addSeparator()
         claude_action = menu.addAction("Ask Claude")
         claude_action.triggered.connect(lambda: self._open_web_ai("claude", selected))
@@ -1303,6 +1304,44 @@ class ReaderView(QWebEngineView):
             url = QUrl(f"https://chatgpt.com/?q={encoded}")
         QDesktopServices.openUrl(url)
 
+
+
+
+class TranslatePanel(QWidget):
+    """Sidebar that embeds a QWebEngineView to show Google Translate in-app."""
+
+    closeRequested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumWidth(280)
+
+        self._view = QWebEngineView()
+
+        title = QLabel("Google Translate")
+        title.setStyleSheet("font-weight: bold; font-size: 12px;")
+
+        open_btn = QPushButton("Open in Browser")
+        open_btn.setToolTip("Open the current URL in the default browser")
+        open_btn.clicked.connect(self._open_in_browser)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(8, 4, 4, 4)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(open_btn)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addLayout(header)
+        layout.addWidget(self._view, 1)
+
+    def load_url(self, url: QUrl) -> None:
+        self._view.load(url)
+
+    def _open_in_browser(self) -> None:
+        QDesktopServices.openUrl(self._view.url())
 
 
 
@@ -2035,6 +2074,7 @@ class MainWindow(QMainWindow):
         self.hide_tashkeel = str(self.settings.value("hide_tashkeel", "false")) == "true"
         self.dark_mode = str(self.settings.value("dark_mode", "false")) == "true"
         self.toolbar_style = str(self.settings.value("toolbar_style", "icon"))
+        self.translate_in_app = str(self.settings.value("translate_in_app", "false")) == "true"
         self._font_options: list[FontOption] = load_font_options()
         self.reader_font = str(self.settings.value("reader_font", "System Default"))
         self._recent_files: list[str] = self._load_recent_files()
@@ -2054,6 +2094,10 @@ class MainWindow(QMainWindow):
         self.reader_view.loadFinished.connect(self.install_word_click_handler)
         self.reader_view.aiActionRequested.connect(self._handle_ai_action)
         self.reader_view.customAiRequested.connect(self._handle_custom_ai)
+        self.reader_view.translateRequested.connect(self._handle_translate)
+
+        self._translate_panel = TranslatePanel()
+        self._translate_panel.setVisible(False)
 
         self._ai_panel = OllamaPanel(self.settings)
         self._ai_panel.setVisible(False)
@@ -2061,10 +2105,12 @@ class MainWindow(QMainWindow):
         self._splitter = QSplitter()
         self._splitter.addWidget(self.chapter_list)
         self._splitter.addWidget(self.reader_view)
+        self._splitter.addWidget(self._translate_panel)
         self._splitter.addWidget(self._ai_panel)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setStretchFactor(2, 0)
+        self._splitter.setStretchFactor(3, 0)
         self.setCentralWidget(self._splitter)
 
         self.lookup_popup = LookupPopup(self)
@@ -2096,6 +2142,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("dark_mode", "true" if self.dark_mode else "false")
         self.settings.setValue("toolbar_style", self.toolbar_style)
         self.settings.setValue("reader_font", self.reader_font)
+        self.settings.setValue("translate_in_app", "true" if self.translate_in_app else "false")
         if self.book.path:
             self.settings.setValue("last_epub_path", str(self.book.path))
             self.settings.setValue(f"last_chapter::{self.book.path}", self.current_chapter_index)
@@ -2240,6 +2287,12 @@ class MainWindow(QMainWindow):
         self._ai_panel_action.setChecked(False)
         self._ai_panel_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
         self._ai_panel_action.toggled.connect(self._toggle_ai_panel)
+
+        self._translate_in_app_action = view_menu.addAction("Google Translate: Open in App Panel")
+        self._translate_in_app_action.setCheckable(True)
+        self._translate_in_app_action.setChecked(self.translate_in_app)
+        self._translate_in_app_action.setShortcut(QKeySequence("Ctrl+Shift+T"))
+        self._translate_in_app_action.toggled.connect(self._toggle_translate_mode)
         view_menu.addSeparator()
 
         toolbar_menu = view_menu.addMenu("Toolbar Style")
@@ -2517,6 +2570,34 @@ class MainWindow(QMainWindow):
         });
         """
         self.reader_view.page().runJavaScript(js)
+
+    # ── Translate panel ───────────────────────────────────────────────────────
+
+    def _toggle_translate_mode(self, checked: bool) -> None:
+        self.translate_in_app = checked
+        if not checked:
+            self._translate_panel.setVisible(False)
+
+    def _show_translate_panel(self) -> None:
+        if not self._translate_panel.isVisible():
+            self._translate_panel.setVisible(True)
+            sizes = self._splitter.sizes()
+            if sizes[2] == 0:
+                total = sum(sizes)
+                panel_width = min(420, total // 3)
+                sizes[2] = panel_width
+                sizes[1] = max(200, sizes[1] - panel_width)
+                self._splitter.setSizes(sizes)
+
+    def _handle_translate(self, text: str) -> None:
+        url = QUrl(
+            f"https://translate.google.com/?sl=ar&tl=en&text={quote(text)}&op=translate"
+        )
+        if self.translate_in_app:
+            self._show_translate_panel()
+            self._translate_panel.load_url(url)
+        else:
+            QDesktopServices.openUrl(url)
 
     # ── AI panel ──────────────────────────────────────────────────────────────
 
