@@ -196,7 +196,6 @@ img, svg, video {
 .lookup-word {
     cursor: pointer;
     border-radius: 4px;
-    padding: 0 1px;
 }
 .lookup-word:hover {
     background: rgba(255, 220, 120, 0.55);
