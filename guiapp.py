@@ -39,7 +39,9 @@ import os
 import re
 import sqlite3
 import sys
+import subprocess
 import tempfile
+import urllib.request as _urllib_req
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -81,7 +83,7 @@ except Exception:  # macOS/PyObjC only
     DCSCopyTextDefinition = None
 
 try:
-    from PyQt6.QtCore import Qt, QByteArray, QSize, QUrl, QSettings, QTimer, pyqtSignal
+    from PyQt6.QtCore import Qt, QByteArray, QSize, QUrl, QSettings, QThread, QTimer, pyqtSignal
     from PyQt6.QtGui import (
         QAction, QActionGroup, QCursor, QDesktopServices, QGuiApplication, QIcon,
         QKeySequence, QPainter, QPalette, QPixmap,
@@ -90,6 +92,7 @@ try:
     from PyQt6.QtWidgets import (
         QApplication,
         QFileDialog,
+        QInputDialog,
         QDialog,
         QFrame,
         QHBoxLayout,
@@ -425,6 +428,67 @@ def load_font_options() -> list[FontOption]:
             options.append(FontOption(display_name=display, css_family=display, file_path=ttf))
     return options
 
+
+
+# ── Ollama integration ─────────────────────────────────────────────────────
+
+OLLAMA_BASE_URL = "http://localhost:11434"
+
+RECOMMENDED_MODELS = [
+    {
+        "id": "aya-expanse:32b",
+        "ram": "~20 GB",
+        "note": "Best overall Arabic quality; requires Apple Silicon with 36 GB+ RAM",
+    },
+    {
+        "id": "gemma3:27b",
+        "ram": "~18 GB",
+        "note": "Excellent quality; M1/M2 Pro or Max with 16 GB+ RAM",
+    },
+    {
+        "id": "jwnder/jais-adaptive:7b",
+        "ram": "~5 GB",
+        "note": "Good Arabic support; works on any Mac with 8 GB+ RAM",
+    },
+    {
+        "id": "gemma4:e4b",
+        "ram": "~3 GB",
+        "note": "Lightweight 4-bit model; fastest but less accurate on complex Arabic",
+    },
+]
+
+
+def _ollama_running() -> bool:
+    try:
+        req = _urllib_req.Request(f"{OLLAMA_BASE_URL}/api/tags", method="GET")
+        with _urllib_req.urlopen(req, timeout=3):
+            return True
+    except Exception:
+        return False
+
+
+def _fetch_installed_models() -> list[str]:
+    try:
+        req = _urllib_req.Request(f"{OLLAMA_BASE_URL}/api/tags", method="GET")
+        with _urllib_req.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        return [m["name"] for m in data.get("models", [])]
+    except Exception:
+        return []
+
+
+def load_prompts() -> list[dict]:
+    path = _BASE_DIR / "assets" / "prompts.json"
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("actions", [])
+    except Exception as exc:
+        print(f"Warning: could not load prompts.json: {exc}")
+        return []
+
+
+_PROMPT_ACTIONS: list[dict] = []  # populated in main() after _BASE_DIR is set
 
 
 @dataclass
@@ -1145,6 +1209,8 @@ class ReaderPage(QWebEnginePage):
 
 class ReaderView(QWebEngineView):
     wordClicked = pyqtSignal(str)
+    aiActionRequested = pyqtSignal(str, str)   # action_id, selected_text
+    customAiRequested = pyqtSignal(str, str)   # custom_prompt_template, selected_text
 
     def mouseReleaseEvent(self, event):  # noqa: N802 - Qt method name
         super().mouseReleaseEvent(event)
@@ -1188,15 +1254,392 @@ class ReaderView(QWebEngineView):
         menu = QMenu(self)
         copy_action = menu.addAction("Copy")
         copy_action.triggered.connect(lambda: QApplication.clipboard().setText(selected))
-        menu.addSeparator()
         translate_action = menu.addAction("Translate on Google")
         translate_action.triggered.connect(lambda: self._open_google_translate(selected))
+
+        if _PROMPT_ACTIONS:
+            menu.addSeparator()
+            ai_menu = menu.addMenu("Ask AI")
+            for act in _PROMPT_ACTIONS:
+                a = ai_menu.addAction(act["label"])
+                a.triggered.connect(
+                    lambda _, aid=act["id"], sel=selected: self.aiActionRequested.emit(aid, sel)
+                )
+            ai_menu.addSeparator()
+            custom_a = ai_menu.addAction("Ask Custom Prompt…")
+            custom_a.triggered.connect(lambda: self._ask_custom(selected))
+
         menu.exec(event.globalPos())
+
+    def _ask_custom(self, selected: str) -> None:
+        prompt, ok = QInputDialog.getMultiLineText(
+            self,
+            "Custom AI Prompt",
+            "Enter your prompt. Use {text} to refer to the selected passage:",
+            "Explain this in the context of Arabic literature:\n\n{text}",
+        )
+        if ok and prompt.strip():
+            self.customAiRequested.emit(prompt.strip(), selected)
 
     @staticmethod
     def _open_google_translate(text: str) -> None:
         url = QUrl(f"https://translate.google.com/?sl=ar&tl=en&text={quote(text)}&op=translate")
         QDesktopServices.openUrl(url)
+
+
+
+class OllamaWorker(QThread):
+    """Background thread that streams tokens from the Ollama /api/generate endpoint."""
+
+    token_ready = pyqtSignal(str)
+    finished = pyqtSignal()
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, model: str, system: str, prompt: str) -> None:
+        super().__init__()
+        self._model = model
+        self._system = system
+        self._prompt = prompt
+        self._abort = False
+
+    def abort(self) -> None:
+        self._abort = True
+
+    def run(self) -> None:
+        payload = json.dumps({
+            "model": self._model,
+            "system": self._system,
+            "prompt": self._prompt,
+            "stream": True,
+        }).encode()
+        try:
+            req = _urllib_req.Request(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with _urllib_req.urlopen(req, timeout=300) as resp:
+                for raw_line in resp:
+                    if self._abort:
+                        break
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    token = obj.get("response", "")
+                    if token:
+                        self.token_ready.emit(token)
+                    if obj.get("done"):
+                        break
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
+class _PullWorker(QThread):
+    finished_ok = pyqtSignal()
+    finished_err = pyqtSignal(str)
+
+    def __init__(self, model_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self._model_id = model_id
+
+    def run(self) -> None:
+        try:
+            result = subprocess.run(
+                ["ollama", "pull", self._model_id],
+                capture_output=True, text=True, timeout=1800,
+            )
+            if result.returncode == 0:
+                self.finished_ok.emit()
+            else:
+                self.finished_err.emit(result.stderr.strip() or "Unknown error")
+        except Exception as exc:
+            self.finished_err.emit(str(exc))
+
+
+class OllamaSetupDialog(QDialog):
+    """Shown when Ollama is not reachable — explains installation and model options."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Ollama Required")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel("Ollama is not running")
+        title.setStyleSheet("font-size: 15px; font-weight: bold;")
+        layout.addWidget(title)
+
+        intro = QLabel(
+            "The AI features in Kalima require <b>Ollama</b>, a free local AI runtime "
+            "that runs language models entirely on your Mac — no internet connection or "
+            "account needed after the initial model download."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        install_box = QFrame()
+        install_box.setFrameShape(QFrame.Shape.StyledPanel)
+        ib = QVBoxLayout(install_box)
+        ib.addWidget(QLabel("<b>Install Ollama</b>"))
+        ib.addWidget(QLabel("Option A — Homebrew (recommended):"))
+        brew = QLabel("    brew install ollama")
+        brew.setStyleSheet("font-family: monospace; padding: 2px 0;")
+        ib.addWidget(brew)
+        ib.addWidget(QLabel("Option B — Download the app directly:"))
+        link = QLabel('<a href="https://ollama.com">https://ollama.com</a>')
+        link.setOpenExternalLinks(True)
+        ib.addWidget(link)
+        ib.addWidget(QLabel("After installing, start the server with:"))
+        serve = QLabel("    ollama serve")
+        serve.setStyleSheet("font-family: monospace; padding: 2px 0;")
+        ib.addWidget(serve)
+        layout.addWidget(install_box)
+
+        layout.addWidget(QLabel("<b>Recommended models</b> (choose based on your Mac's RAM):"))
+
+        for m in RECOMMENDED_MODELS:
+            row = QLabel(f"  •  <b>{m['id']}</b>  —  {m['ram']} RAM  —  {m['note']}")
+            row.setWordWrap(True)
+            layout.addWidget(row)
+
+        note = QLabel(
+            "Smaller models are faster but less accurate on complex Arabic text such as "
+            "classical prose or poetry. Larger models give better morphological analysis "
+            "and more natural translations."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(note)
+
+        btn_row = QHBoxLayout()
+        check_btn = QPushButton("Check Again")
+        check_btn.clicked.connect(self._check_again)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(check_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _check_again(self) -> None:
+        if _ollama_running():
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Not found", "Ollama is still not reachable at localhost:11434.")
+
+
+class ModelManagerDialog(QDialog):
+    """Lists recommended models, shows install status, and offers to pull missing ones."""
+
+    def __init__(self, installed: list[str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Manage AI Models")
+        self.setMinimumWidth(540)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        layout.addWidget(QLabel("<b>Recommended models for Arabic</b>"))
+        layout.addWidget(QLabel(
+            "Click Pull to download a model. Downloads may take several minutes."
+        ))
+
+        for m in RECOMMENDED_MODELS:
+            is_installed = any(m["id"] in name for name in installed)
+            row = QHBoxLayout()
+            name_lbl = QLabel(f"<b>{m['id']}</b>  ({m['ram']})")
+            name_lbl.setMinimumWidth(270)
+            status_lbl = QLabel("✓ Installed" if is_installed else "Not installed")
+            status_lbl.setStyleSheet("color: green;" if is_installed else "color: gray;")
+            pull_btn = QPushButton("Pull")
+            pull_btn.setEnabled(not is_installed)
+            pull_btn.clicked.connect(
+                lambda _, mid=m["id"], sl=status_lbl, pb=pull_btn: self._pull(mid, sl, pb)
+            )
+            row.addWidget(name_lbl)
+            row.addWidget(status_lbl)
+            row.addStretch()
+            row.addWidget(pull_btn)
+            layout.addLayout(row)
+
+        layout.addSpacing(6)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+
+    def _pull(self, model_id: str, status_lbl: "QLabel", pull_btn: "QPushButton") -> None:
+        pull_btn.setEnabled(False)
+        status_lbl.setText("Downloading… (may take several minutes)")
+        status_lbl.setStyleSheet("color: orange;")
+        worker = _PullWorker(model_id, self)
+        worker.finished_ok.connect(lambda: self._pull_done(status_lbl, True))
+        worker.finished_err.connect(lambda err: self._pull_done(status_lbl, False, err))
+        worker.start()
+        self._current_pull = worker
+
+    def _pull_done(self, status_lbl: "QLabel", ok: bool, err: str = "") -> None:
+        if ok:
+            status_lbl.setText("✓ Installed")
+            status_lbl.setStyleSheet("color: green;")
+        else:
+            status_lbl.setText(f"Failed: {err}")
+            status_lbl.setStyleSheet("color: red;")
+
+
+class OllamaPanel(QWidget):
+    """Resizable side panel that runs AI prompts via Ollama and streams the response."""
+
+    def __init__(self, settings: "QSettings", parent=None) -> None:
+        super().__init__(parent)
+        self._settings = settings
+        self._worker: Optional[OllamaWorker] = None
+        self.setMinimumWidth(240)
+
+        header = QLabel("AI Assistant")
+        header.setStyleSheet("font-weight: bold; font-size: 13px;")
+
+        manage_btn = QPushButton("Models…")
+        manage_btn.setToolTip("Manage recommended models")
+        manage_btn.clicked.connect(self._manage_models)
+
+        header_row = QHBoxLayout()
+        header_row.addWidget(header)
+        header_row.addStretch()
+        header_row.addWidget(manage_btn)
+
+        self.model_combo = QComboBox()
+        self.model_combo.setToolTip("Active Ollama model")
+        refresh_btn = QPushButton("↻")
+        refresh_btn.setFixedWidth(28)
+        refresh_btn.setToolTip("Refresh model list")
+        refresh_btn.clicked.connect(self.refresh_models)
+
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Model:"))
+        model_row.addWidget(self.model_combo, 1)
+        model_row.addWidget(refresh_btn)
+
+        self._action_label = QLabel("")
+        self._action_label.setStyleSheet("color: gray; font-size: 11px;")
+        self._action_label.setWordWrap(True)
+
+        self.response_view = QTextEdit()
+        self.response_view.setReadOnly(True)
+        self.response_view.setPlaceholderText(
+            "Select text in the reader and right-click → Ask AI…"
+        )
+
+        self._stop_btn = QPushButton("Stop generation")
+        self._stop_btn.setVisible(False)
+        self._stop_btn.clicked.connect(self._stop_generation)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        layout.addLayout(header_row)
+        layout.addLayout(model_row)
+        layout.addWidget(self._action_label)
+        layout.addWidget(self.response_view, 1)
+        layout.addWidget(self._stop_btn)
+
+        self.refresh_models()
+
+    def refresh_models(self) -> None:
+        models = _fetch_installed_models()
+        prev = self.model_combo.currentText()
+        self.model_combo.clear()
+        if models:
+            self.model_combo.addItems(models)
+            idx = self.model_combo.findText(prev)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            saved = str(self._settings.value("ai_model", ""))
+            if saved:
+                idx2 = self.model_combo.findText(saved)
+                if idx2 >= 0:
+                    self.model_combo.setCurrentIndex(idx2)
+        else:
+            self.model_combo.addItem("(no models — is Ollama running?)")
+        self.model_combo.currentTextChanged.connect(
+            lambda t: self._settings.setValue("ai_model", t)
+        )
+
+    def current_model(self) -> str:
+        return self.model_combo.currentText()
+
+    def run_action(self, action_id: str, text: str, custom_prompt: str = "") -> None:
+        if not _ollama_running():
+            dlg = OllamaSetupDialog(self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            self.refresh_models()
+
+        if action_id == "custom":
+            system = "You are a helpful Arabic language assistant."
+            if "{text}" in custom_prompt:
+                prompt = custom_prompt.replace("{text}", text)
+            else:
+                prompt = custom_prompt + "\n\n" + text
+            label = custom_prompt[:60] + ("…" if len(custom_prompt) > 60 else "")
+        else:
+            action = next((a for a in _PROMPT_ACTIONS if a["id"] == action_id), None)
+            if action is None:
+                return
+            system = action.get("system", "")
+            prompt = action["user_template"].replace("{text}", text)
+            label = action["label"]
+
+        model = self.current_model()
+        if not model or model.startswith("("):
+            QMessageBox.warning(self, "No model selected", "Please select a valid model from the dropdown.")
+            return
+
+        preview = text[:60] + ("…" if len(text) > 60 else "")
+        self._action_label.setText(f"{label}  ·  “{preview}”")
+        self.response_view.clear()
+        self._stop_btn.setVisible(True)
+
+        if self._worker and self._worker.isRunning():
+            self._worker.abort()
+            self._worker.wait()
+
+        self._worker = OllamaWorker(model=model, system=system, prompt=prompt)
+        self._worker.token_ready.connect(self._append_token)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.error_occurred.connect(self._on_error)
+        self._worker.start()
+
+    def _append_token(self, token: str) -> None:
+        cursor = self.response_view.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(token)
+        self.response_view.setTextCursor(cursor)
+        self.response_view.ensureCursorVisible()
+
+    def _stop_generation(self) -> None:
+        if self._worker:
+            self._worker.abort()
+        self._stop_btn.setVisible(False)
+
+    def _on_finished(self) -> None:
+        self._stop_btn.setVisible(False)
+
+    def _on_error(self, msg: str) -> None:
+        self.response_view.append(f"\n\n[Error: {msg}]")
+        self._stop_btn.setVisible(False)
+
+    def _manage_models(self) -> None:
+        installed = _fetch_installed_models()
+        dlg = ModelManagerDialog(installed, self)
+        dlg.exec()
+        self.refresh_models()
 
 
 class SaveVocabDialog(QDialog):
@@ -1591,13 +2034,20 @@ class MainWindow(QMainWindow):
         self.reader_view.setZoomFactor(self.zoom_factor)
         self.reader_view.wordClicked.connect(self.lookup_word)
         self.reader_view.loadFinished.connect(self.install_word_click_handler)
+        self.reader_view.aiActionRequested.connect(self._handle_ai_action)
+        self.reader_view.customAiRequested.connect(self._handle_custom_ai)
 
-        splitter = QSplitter()
-        splitter.addWidget(self.chapter_list)
-        splitter.addWidget(self.reader_view)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
+        self._ai_panel = OllamaPanel(self.settings)
+        self._ai_panel.setVisible(False)
+
+        self._splitter = QSplitter()
+        self._splitter.addWidget(self.chapter_list)
+        self._splitter.addWidget(self.reader_view)
+        self._splitter.addWidget(self._ai_panel)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setStretchFactor(2, 0)
+        self.setCentralWidget(self._splitter)
 
         self.lookup_popup = LookupPopup(self)
         self.lookup_popup.saveRequested.connect(self.open_save_vocabulary_dialog)
@@ -1766,6 +2216,14 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.export_action)
 
         view_menu = self.menuBar().addMenu("View")
+
+        self._ai_panel_action = view_menu.addAction("Show AI Panel")
+        self._ai_panel_action.setCheckable(True)
+        self._ai_panel_action.setChecked(False)
+        self._ai_panel_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        self._ai_panel_action.toggled.connect(self._toggle_ai_panel)
+        view_menu.addSeparator()
+
         toolbar_menu = view_menu.addMenu("Toolbar Style")
         style_group = QActionGroup(self)
         style_group.setExclusive(True)
@@ -2042,6 +2500,33 @@ class MainWindow(QMainWindow):
         """
         self.reader_view.page().runJavaScript(js)
 
+    # ── AI panel ──────────────────────────────────────────────────────────────
+
+    def _toggle_ai_panel(self, checked: bool) -> None:
+        self._ai_panel.setVisible(checked)
+        if checked:
+            sizes = self._splitter.sizes()
+            if sizes[-1] == 0:
+                total = sum(sizes)
+                panel_width = min(380, total // 3)
+                sizes[-1] = panel_width
+                sizes[-2] = max(200, sizes[-2] - panel_width)
+                self._splitter.setSizes(sizes)
+
+    def _show_ai_panel(self) -> None:
+        if not self._ai_panel.isVisible():
+            self._ai_panel_action.setChecked(True)  # triggers _toggle_ai_panel
+
+    def _handle_ai_action(self, action_id: str, text: str) -> None:
+        self._show_ai_panel()
+        self._ai_panel.run_action(action_id, text)
+
+    def _handle_custom_ai(self, prompt_template: str, text: str) -> None:
+        self._show_ai_panel()
+        self._ai_panel.run_action("custom", text, custom_prompt=prompt_template)
+
+    # ── Toolbar icon refresh ──────────────────────────────────────────────────
+
     def _refresh_toolbar_icons(self) -> None:
         """Re-render all toolbar SVG icons for the current light/dark appearance."""
         for action in self._toolbar.actions():
@@ -2218,6 +2703,9 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    global _PROMPT_ACTIONS
+    _PROMPT_ACTIONS = load_prompts()
+
     app = QApplication(sys.argv)
     app.setOrganizationName(APP_ORG)
     app.setApplicationName(APP_NAME)
