@@ -83,7 +83,7 @@ except Exception:  # macOS/PyObjC only
 try:
     from PyQt6.QtCore import Qt, QByteArray, QSize, QUrl, QSettings, QTimer, pyqtSignal
     from PyQt6.QtGui import (
-        QAction, QActionGroup, QCursor, QGuiApplication, QIcon,
+        QAction, QActionGroup, QCursor, QDesktopServices, QGuiApplication, QIcon,
         QKeySequence, QPainter, QPalette, QPixmap,
     )
     from PyQt6.QtSvg import QSvgRenderer
@@ -1180,6 +1180,24 @@ class ReaderView(QWebEngineView):
         if word:
             self.wordClicked.emit(word)
 
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        selected = self.page().selectedText().strip()
+        if not selected:
+            super().contextMenuEvent(event)
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy")
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(selected))
+        menu.addSeparator()
+        translate_action = menu.addAction("Translate on Google")
+        translate_action.triggered.connect(lambda: self._open_google_translate(selected))
+        menu.exec(event.globalPosition().toPoint())
+
+    @staticmethod
+    def _open_google_translate(text: str) -> None:
+        url = QUrl(f"https://translate.google.com/?sl=ar&tl=en&text={quote(text)}&op=translate")
+        QDesktopServices.openUrl(url)
+
 
 class SaveVocabDialog(QDialog):
     deletedRequested = pyqtSignal(object)
@@ -1591,6 +1609,10 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_menu_bar()
         self.setStatusBar(QStatusBar())
+        self._progress_label = QLabel()
+        self._progress_label.setStyleSheet("padding-right: 8px; color: gray;")
+        self.statusBar().addPermanentWidget(self._progress_label)
+        self.reader_page.scrollPositionChanged.connect(self._on_scroll_changed)
         QApplication.instance().paletteChanged.connect(self._refresh_toolbar_icons)
 
         last_path = self.settings.value("last_epub_path", "")
@@ -1819,6 +1841,7 @@ class MainWindow(QMainWindow):
         self.chapter_list.blockSignals(False)
 
         self.reader_view.load(QUrl.fromLocalFile(str(chapter.file_path)))
+        self._update_progress_label(index, 0)
         self.statusBar().showMessage(
             f"Chapter {index + 1} of {len(self.book.chapters)} — single-click a word for Dictionary lookup"
         )
@@ -2029,6 +2052,30 @@ class MainWindow(QMainWindow):
             self._search_icon_label.setPixmap(
                 svg_icon("search", size=18).pixmap(QSize(18, 18))
             )
+
+    # ── Progress indicator ────────────────────────────────────────────────────
+
+    def _update_progress_label(self, chapter_index: int, pct: int) -> None:
+        total = len(self.book.chapters)
+        if total > 0 and chapter_index >= 0:
+            self._progress_label.setText(f"Ch {chapter_index + 1} / {total}  ·  {pct}%")
+        else:
+            self._progress_label.setText("")
+
+    def _on_scroll_changed(self) -> None:
+        self.reader_page.runJavaScript(
+            "(function(){"
+            "  var h = document.body.scrollHeight - window.innerHeight;"
+            "  return h > 10 ? Math.round(window.scrollY / h * 100) : 100;"
+            "})()",
+            self._apply_scroll_pct,
+        )
+
+    def _apply_scroll_pct(self, pct: object) -> None:
+        if pct is not None and self.current_chapter_index >= 0:
+            self._update_progress_label(self.current_chapter_index, int(pct))
+
+    # ── Font picker ───────────────────────────────────────────────────────────
 
     def _current_font_option(self) -> FontOption:
         for opt in self._font_options:
