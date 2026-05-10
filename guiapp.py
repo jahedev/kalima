@@ -83,6 +83,11 @@ except Exception:  # macOS/PyObjC only
     DCSCopyTextDefinition = None
 
 try:
+    import genanki as _genanki
+except ImportError:
+    _genanki = None  # type: ignore[assignment]
+
+try:
     from PyQt6.QtCore import Qt, QByteArray, QSize, QUrl, QSettings, QThread, QTimer, pyqtSignal
     from PyQt6.QtGui import (
         QAction, QActionGroup, QCursor, QDesktopServices, QGuiApplication, QIcon,
@@ -488,6 +493,97 @@ def load_prompts() -> list[dict]:
 
 
 _PROMPT_ACTIONS: list[dict] = []  # populated in main() after _BASE_DIR is set
+
+# ── Anki export ───────────────────────────────────────────────────────────────
+# This model ID is permanent — changing it would orphan existing Anki notes.
+_ANKI_MODEL_ID = 1700000001
+
+
+def _anki_model() -> "object":
+    return _genanki.Model(
+        _ANKI_MODEL_ID,
+        "Kalima Arabic",
+        fields=[
+            {"name": "Arabic"},
+            {"name": "Definition"},
+            {"name": "DictionaryDef"},
+            {"name": "Note"},
+            {"name": "Source"},
+        ],
+        templates=[{
+            "name": "Recognition",
+            "qfmt": '<div class="arabic">{{Arabic}}</div>',
+            "afmt": (
+                '{{FrontSide}}<hr id="answer">'
+                '<div class="definition">{{Definition}}</div>'
+                '{{#DictionaryDef}}<div class="dictdef">{{DictionaryDef}}</div>{{/DictionaryDef}}'
+                '{{#Note}}<div class="note">{{Note}}</div>{{/Note}}'
+                '<div class="source">{{Source}}</div>'
+            ),
+        }],
+        css=(
+            ".card{font-family:'Geeza Pro',serif;font-size:20px;text-align:center;}"
+            ".arabic{font-size:36px;font-weight:bold;direction:rtl;margin:16px 0;}"
+            ".definition{direction:rtl;font-size:18px;margin:12px 0;}"
+            ".dictdef{color:#555;font-size:13px;border-top:1px solid #eee;"
+            "padding-top:8px;margin-top:8px;direction:rtl;}"
+            ".note{color:#7c5000;font-size:13px;font-style:italic;margin:8px 0;}"
+            ".source{color:#aaa;font-size:11px;margin-top:16px;}"
+        ),
+    )
+
+
+def build_anki_package(records: "list[SavedVocab]", output_path: Path) -> int:
+    """Build an .apkg from vocab records. Returns the number of cards written.
+
+    Cards are keyed by (book_id, normalized_word) so re-exporting the same
+    word updates the existing Anki note rather than creating a duplicate.
+    """
+    if _genanki is None:
+        raise RuntimeError("genanki is not installed. Run: pip install genanki")
+
+    import zlib
+
+    model = _anki_model()
+
+    # Group records by book so each book becomes its own subdeck.
+    from collections import defaultdict
+    by_book: dict[str, list] = defaultdict(list)
+    for r in records:
+        by_book[r.book_id].append(r)
+
+    decks = []
+    for book_id, book_records in by_book.items():
+        book_title = book_records[0].book_title or book_id
+        deck_name = f"Kalima::{book_title}"
+        # Stable deck ID derived from the deck name (zlib.crc32 is deterministic).
+        deck_id = zlib.crc32(deck_name.encode()) & 0x7FFFFFFF
+        deck = _genanki.Deck(deck_id, deck_name)
+
+        for r in book_records:
+            source = r.book_title or ""
+            if r.chapter_title:
+                source += f" · {r.chapter_title}"
+            # Strip HTML from saved_definition for the card front field.
+            import re as _re
+            plain_def = _re.sub(r"<[^>]+>", "", r.saved_definition).strip()
+            note = _genanki.Note(
+                model=model,
+                fields=[
+                    r.word,
+                    plain_def,
+                    r.dictionary_definition or "",
+                    r.note or "",
+                    source,
+                ],
+                guid=_genanki.guid_for(book_id, r.normalized_word),
+            )
+            deck.add_note(note)
+        decks.append(deck)
+
+    package = _genanki.Package(decks)
+    package.write_to_file(str(output_path))
+    return sum(len(d.notes) for d in decks)
 
 
 @dataclass
@@ -969,6 +1065,19 @@ class VocabularyStore:
                 "DELETE FROM vocab WHERE book_id = ? AND normalized_word = ?",
                 (book_id, normalized_word),
             )
+
+    def vocab_for_export(self, book_id: Optional[str] = None) -> "list[SavedVocab]":
+        with self.connect() as conn:
+            if book_id:
+                rows = conn.execute(
+                    "SELECT * FROM vocab WHERE book_id = ? ORDER BY updated_at DESC",
+                    (book_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM vocab ORDER BY book_title, updated_at DESC"
+                ).fetchall()
+        return [self._row_to_vocab(r) for r in rows]
 
     def export_csv(self, csv_path: Path) -> None:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1790,6 +1899,137 @@ class SaveVocabDialog(QDialog):
         
 
 
+class AnkiExportDialog(QDialog):
+    """Scope + destination picker for Anki .apkg export."""
+
+    def __init__(
+        self,
+        vocab_store: "VocabularyStore",
+        current_book_id: str,
+        current_book_title: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Export to Anki")
+        self.setMinimumWidth(440)
+        self._store = vocab_store
+        self._current_book_id = current_book_id
+        self._current_book_title = current_book_title
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("<b>Export vocabulary to Anki (.apkg)</b>"))
+        layout.addWidget(QLabel(
+            "Cards are keyed by word so re-importing updates existing notes "
+            "rather than creating duplicates."
+        ))
+
+        # ── Scope ──────────────────────────────────────────────────────────
+        scope_box = QFrame()
+        scope_box.setFrameShape(QFrame.Shape.StyledPanel)
+        sb = QVBoxLayout(scope_box)
+        self._rb_current = None
+
+        from PyQt6.QtWidgets import QRadioButton, QButtonGroup
+        self._scope_group = QButtonGroup(self)
+
+        if current_book_id:
+            self._rb_current = QRadioButton(
+                f"Current book only  ({current_book_title or current_book_id})"
+            )
+            self._rb_current.setChecked(True)
+            self._scope_group.addButton(self._rb_current, 0)
+            sb.addWidget(self._rb_current)
+
+        rb_all = QRadioButton("All books")
+        if not current_book_id:
+            rb_all.setChecked(True)
+        self._scope_group.addButton(rb_all, 1)
+        sb.addWidget(rb_all)
+        layout.addWidget(scope_box)
+
+        # ── Destination ────────────────────────────────────────────────────
+        dest_row = QHBoxLayout()
+        self._dest_edit = QLineEdit()
+        default_name = (
+            f"Kalima - {current_book_title}.apkg" if current_book_id else "Kalima.apkg"
+        )
+        self._dest_edit.setText(
+            str(Path.home() / "Desktop" / default_name)
+        )
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse)
+        dest_row.addWidget(self._dest_edit, 1)
+        dest_row.addWidget(browse_btn)
+        layout.addWidget(QLabel("Save as:"))
+        layout.addLayout(dest_row)
+
+        # Update filename when scope changes
+        self._scope_group.idToggled.connect(self._update_filename)
+
+        # ── Buttons ────────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        export_btn = QPushButton("Export")
+        export_btn.setDefault(True)
+        export_btn.clicked.connect(self._do_export)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(export_btn)
+        layout.addLayout(btn_row)
+
+    def _update_filename(self, btn_id: int, checked: bool) -> None:
+        if not checked:
+            return
+        if btn_id == 0 and self._current_book_title:
+            name = f"Kalima - {self._current_book_title}.apkg"
+        else:
+            name = "Kalima.apkg"
+        folder = Path(self._dest_edit.text()).parent
+        self._dest_edit.setText(str(folder / name))
+
+    def _browse(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Anki deck", self._dest_edit.text(),
+            "Anki Package (*.apkg);;All files (*)",
+        )
+        if path:
+            if not path.endswith(".apkg"):
+                path += ".apkg"
+            self._dest_edit.setText(path)
+
+    def _do_export(self) -> None:
+        book_id = (
+            self._current_book_id
+            if (self._rb_current and self._rb_current.isChecked())
+            else None
+        )
+        records = self._store.vocab_for_export(book_id)
+        if not records:
+            QMessageBox.information(self, "Nothing to export", "No vocabulary words found.")
+            return
+
+        output = Path(self._dest_edit.text().strip())
+        if not output.suffix:
+            output = output.with_suffix(".apkg")
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            count = build_anki_package(records, output)
+            QMessageBox.information(
+                self,
+                "Export complete",
+                f"Exported {count} card{'s' if count != 1 else ''} to:\n{output}\n\n"
+                "Double-click the file in Finder to import into Anki.\n"
+                "Re-importing will update existing cards automatically.",
+            )
+            self.accept()
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+
+
+
 class VocabBrowserDialog(QDialog):
     def __init__(self, vocab_store: "VocabularyStore", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1833,6 +2073,10 @@ class VocabBrowserDialog(QDialog):
         self.delete_btn = QPushButton("Delete")
         self.delete_btn.clicked.connect(self._delete_selected)
 
+        anki_btn = QPushButton("Export to Anki…")
+        anki_btn.setToolTip("Export vocabulary as an Anki .apkg deck")
+        anki_btn.clicked.connect(self._export_anki)
+
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
 
@@ -1861,6 +2105,7 @@ class VocabBrowserDialog(QDialog):
         btn_row.addWidget(edit_btn)
         btn_row.addWidget(self.delete_btn)
         btn_row.addStretch(1)
+        btn_row.addWidget(anki_btn)
         btn_row.addWidget(close_btn)
         right_layout.addLayout(btn_row)
 
@@ -1956,6 +2201,23 @@ class VocabBrowserDialog(QDialog):
         if reply == QMessageBox.StandardButton.Yes:
             self.vocab_store.delete_word(v.book_id, v.normalized_word)
             self._refresh()
+
+    def _export_anki(self) -> None:
+        if _genanki is None:
+            QMessageBox.critical(
+                self, "genanki not installed",
+                "Install it with:\n\n    pip install genanki\n\nthen restart Kalima.",
+            )
+            return
+        # Pass the current book context if the parent window has one.
+        book_id = ""
+        book_title = ""
+        mw = self.parent()
+        if mw and hasattr(mw, "book") and mw.book.path:
+            book_id = mw.book.book_id
+            book_title = mw.book.title
+        dlg = AnkiExportDialog(self.vocab_store, book_id, book_title, self)
+        dlg.exec()
 
 
 class LookupPopup(QFrame):

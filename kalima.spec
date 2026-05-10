@@ -21,6 +21,8 @@ a = Analysis(
         'PyQt6.QtNetwork',
         # macOS dictionary
         'DictionaryServices',
+        # Anki export
+        'genanki',
         # EPUB / HTML parsing
         'ebooklib',
         'ebooklib.epub',
