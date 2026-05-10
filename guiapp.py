@@ -1065,7 +1065,7 @@ class EpubBook:
 
     def _prepare_html(self, content: bytes) -> bytes:
         try:
-            soup = BeautifulSoup(content, "lxml")
+            soup = BeautifulSoup(content, "lxml-xml")
         except Exception:
             soup = BeautifulSoup(content, "html.parser")
 
@@ -1110,7 +1110,7 @@ class EpubBook:
 
     def _extract_title(self, content: bytes, fallback: str) -> str:
         try:
-            soup = BeautifulSoup(content, "lxml")
+            soup = BeautifulSoup(content, "lxml-xml")
         except Exception:
             soup = BeautifulSoup(content, "html.parser")
 
@@ -1191,7 +1191,7 @@ class ReaderView(QWebEngineView):
         menu.addSeparator()
         translate_action = menu.addAction("Translate on Google")
         translate_action.triggered.connect(lambda: self._open_google_translate(selected))
-        menu.exec(event.globalPosition().toPoint())
+        menu.exec(event.globalPos())
 
     @staticmethod
     def _open_google_translate(text: str) -> None:
