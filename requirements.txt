@@ -5,3 +5,4 @@ beautifulsoup4
 lxml
 genanki
 pyobjc-framework-DictionaryServices; sys_platform == "darwin"
+pyinstaller

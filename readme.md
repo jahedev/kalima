@@ -103,11 +103,16 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python kalima.py
+
+# You can build the app by running
+# ./build.sh --app-only
 ```
 
 ### Option C — Pre-built app (macOS only)
 
 Download the latest `.dmg` from [Releases](https://github.com/jahedev/kalima/releases), open it, and drag **Kalima.app** to your Applications folder. Available for both Apple Silicon and Intel.
+
+> **"Apple cannot check it for malicious software"** — this appears because the app is not yet notarised with an Apple Developer certificate. To open it: right-click (or Control-click) `Kalima.app` in Finder → **Open** → **Open**. You only need to do this once.
 
 ---
 
