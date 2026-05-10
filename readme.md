@@ -10,6 +10,10 @@ Dictionary lookup · AI analysis · Vocabulary management · Anki export
 [![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![PyQt6](https://img.shields.io/badge/PyQt6-WebEngine-green)](https://www.riverbankcomputing.com/software/pyqt/)
 
+<br>
+
+![Kalima screenshot](assets/screenshot.png)
+
 </div>
 
 ---
