@@ -467,6 +467,24 @@ RECOMMENDED_MODELS = [
 ]
 
 
+def _find_ollama() -> str:
+    """Return the path to the ollama binary, checking common locations."""
+    import shutil
+    # Try PATH first (works when launched from terminal)
+    found = shutil.which("ollama")
+    if found:
+        return found
+    # Common Homebrew locations (needed when launched as a .app bundle)
+    for candidate in (
+        "/opt/homebrew/bin/ollama",   # Apple Silicon Homebrew
+        "/usr/local/bin/ollama",      # Intel Homebrew
+        "/usr/bin/ollama",
+    ):
+        if Path(candidate).exists():
+            return candidate
+    return "ollama"  # fall back and let the OS report the error naturally
+
+
 def _ollama_running() -> bool:
     try:
         req = _urllib_req.Request(f"{OLLAMA_BASE_URL}/api/tags", method="GET")
@@ -1522,7 +1540,7 @@ class _PullWorker(QThread):
     def run(self) -> None:
         try:
             result = subprocess.run(
-                ["ollama", "pull", self._model_id],
+                [_find_ollama(), "pull", self._model_id],
                 capture_output=True, text=True, timeout=1800,
             )
             if result.returncode == 0:
