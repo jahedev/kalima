@@ -235,6 +235,12 @@ html.reader-dark .lookup-word-saved {
 html.reader-dark a {
     color: #a8c8ff !important;
 }
+@media (max-width: 540px) {
+    html, body { padding: 16px 20px; }
+}
+@media (max-width: 380px) {
+    html, body { padding: 12px 12px; }
+}
 """
 
 WORD_AT_POINT_JS = r"""
