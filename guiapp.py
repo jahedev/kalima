@@ -1256,6 +1256,11 @@ class ReaderView(QWebEngineView):
         copy_action.triggered.connect(lambda: QApplication.clipboard().setText(selected))
         translate_action = menu.addAction("Translate on Google")
         translate_action.triggered.connect(lambda: self._open_google_translate(selected))
+        menu.addSeparator()
+        claude_action = menu.addAction("Ask Claude")
+        claude_action.triggered.connect(lambda: self._open_web_ai("claude", selected))
+        chatgpt_action = menu.addAction("Ask ChatGPT")
+        chatgpt_action.triggered.connect(lambda: self._open_web_ai("chatgpt", selected))
 
         if _PROMPT_ACTIONS:
             menu.addSeparator()
@@ -1285,6 +1290,19 @@ class ReaderView(QWebEngineView):
     def _open_google_translate(text: str) -> None:
         url = QUrl(f"https://translate.google.com/?sl=ar&tl=en&text={quote(text)}&op=translate")
         QDesktopServices.openUrl(url)
+
+    @staticmethod
+    def _open_web_ai(service: str, text: str) -> None:
+        prompt = (
+            f"Translate the following Arabic text to English and identify the most important vocabulary words with their meanings:\n\n{text}"
+        )
+        encoded = quote(prompt)
+        if service == "claude":
+            url = QUrl(f"https://claude.ai/new?q={encoded}")
+        else:
+            url = QUrl(f"https://chatgpt.com/?q={encoded}")
+        QDesktopServices.openUrl(url)
+
 
 
 
